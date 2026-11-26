@@ -85,6 +85,8 @@ class Settings:
     static_dir: Path | None = None
     workers: int = 3
     hsts: bool = False
+    lightning: tuple[str, ...] = ("east", "west")
+    lightning_backfill_min: int = 30
 
     @property
     def db_path(self) -> Path:
@@ -126,6 +128,10 @@ def load_settings() -> Settings:
     else:
         static_dir = here / "static"
 
+    raw_lightning = (_env("MAMMATUS_LIGHTNING", "east,west") or "").lower()
+    lightning = () if raw_lightning in ("off", "false", "none", "0") else tuple(
+        s for s in ("east", "west") if s in {p.strip() for p in raw_lightning.split(",")}) or ("east", "west")
+
     public_url = _env("MAMMATUS_PUBLIC_URL")
     if public_url:
         public_url = public_url.rstrip("/")
@@ -156,6 +162,8 @@ def load_settings() -> Settings:
         static_dir=static_dir,
         workers=max(1, min(8, _int("MAMMATUS_DECODE_WORKERS", 3))),
         hsts=_bool("MAMMATUS_HSTS", False),
+        lightning=lightning,
+        lightning_backfill_min=max(10, min(120, _int("MAMMATUS_LIGHTNING_BACKFILL_MIN", 30))),
     )
 
 

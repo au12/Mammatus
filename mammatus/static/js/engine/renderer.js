@@ -243,6 +243,10 @@ export class Renderer extends EventTarget {
       this.field.mix = u * u * (3 - 2 * u);
       if (u >= 1) { this.field = a.target; this.fieldAnim = null; } else more = true;
     }
+    if (this.strikes?.animating(now)) {
+      if (this.lowPower && now - this._lastFrame < 30) { this._raf = requestAnimationFrame((t) => this._frame(t)); return; }
+      more = true;
+    }
     const p = this.particles;
     let animParticles = false;
     if (p?.enabled) {
@@ -289,6 +293,52 @@ export class Renderer extends EventTarget {
     const sorted = [...this.lines.values()].filter((l) => l.visible !== false && zoom >= (l.minZoom ?? -9) && zoom < (l.maxZoom ?? 99))
       .sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
     if (sorted.length) this._drawLines(common, sorted);
+    if (this.strikes?.visible()) this._drawStrikes(common, now);
+  }
+
+  // ----------------------------------------------------------------- lightning
+  setStrikes(layer) {
+    this.strikes = layer;
+    this.requestRender();
+  }
+
+  _drawStrikes(common, now) {
+    const st = this.strikes.frameState(now);
+    if (!st.vbo || st.count <= 0) return;
+    const gl = this.gl;
+    const p = this.prog("strikes", S.STRIKE_VS, S.STRIKE_FS);
+    gl.useProgram(p.prog);
+    common(p);
+    const u = p.uniforms;
+    gl.uniform1f(u.u_tEnd, st.tEnd);
+    gl.uniform1f(u.u_window, st.window);
+    gl.uniform1f(u.u_mode, st.mode);
+    gl.uniform1f(u.u_prevT, st.prevT);
+    gl.uniform1f(u.u_wall, st.wall);
+    gl.uniform1f(u.u_spread, st.spread);
+    gl.uniform1f(u.u_flash, st.flash);
+    gl.uniform1f(u.u_dot, st.dot);
+    gl.uniform1f(u.u_glow, st.glow);
+    gl.uniform1f(u.u_gain, st.gain);
+    gl.uniform1f(u.u_animFrac, st.animFrac);
+    const A = p.attribs;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.enableVertexAttribArray(A.a_corner);
+    gl.vertexAttribPointer(A.a_corner, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(A.a_corner, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, st.vbo);
+    gl.enableVertexAttribArray(A.a_s);
+    gl.vertexAttribPointer(A.a_s, 4, gl.FLOAT, false, 20, st.first * 20);
+    gl.vertexAttribDivisor(A.a_s, 1);
+    gl.enableVertexAttribArray(A.a_r);
+    gl.vertexAttribPointer(A.a_r, 1, gl.FLOAT, false, 20, st.first * 20 + 16);
+    gl.vertexAttribDivisor(A.a_r, 1);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, st.count);
+    gl.vertexAttribDivisor(A.a_s, 0);
+    gl.vertexAttribDivisor(A.a_r, 0);
+    gl.disableVertexAttribArray(A.a_s);
+    gl.disableVertexAttribArray(A.a_r);
+    gl.disableVertexAttribArray(A.a_corner);
   }
 
   _globeCoversScreen(d) {

@@ -10,3 +10,4 @@ eccodes==2.50.1
 eccodeslib==2.50.0.34
 cryptography==50.0.2
 pillow==13.0.0
+h5py==3.16.0

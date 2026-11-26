@@ -625,3 +625,117 @@ void main() {
   if (a < 0.01) discard;
   o_color = vec4(u_color.rgb * a, a);
 }`;
+
+// Lightning strikes: instanced quads. Dots are colored by age; a strike that has just happened
+// flickers (1-4 return strokes), blooms softly and sends out a faint ring. Glow terms are emitted
+// with alpha 0 so they add light under the premultiplied (ONE, ONE_MINUS_SRC_ALPHA) blend.
+export const STRIKE_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec4 a_s;          // lon, lat (deg), time (s, relative to the layer's base), energy 0..1
+in float a_r;         // per-strike rank 0..1: strikes with a_r < u_animFrac get the flash
+in vec2 a_corner;     // -1..1
+uniform float u_tEnd;     // end of the visible window (same base as a_s.z)
+uniform float u_window;   // window length (s)
+uniform float u_mode;     // 0 live (age drives the flash), 1 stepped (flash spread over the step)
+uniform float u_prevT;    // stepped: start of the newly revealed interval
+uniform float u_wall;     // stepped: wall-clock seconds since the step
+uniform float u_spread;   // stepped: wall-clock seconds the new strikes are spread over
+uniform float u_flash;    // flash duration (s); 0 disables animation
+uniform float u_animFrac; // share of strikes that flash (keeps busy storms subtle)
+uniform float u_dot;      // dot radius scale (device px)
+uniform float u_glow;     // glow radius (device px)
+out vec2 v_px;
+out float v_age;
+out float v_fa;
+out float v_e;
+out float v_seed;
+out float v_r;
+void main() {
+  float age = u_tEnd - a_s.z;
+  bool animated = u_flash > 0.0 && a_r < u_animFrac;
+  bool fresh = u_mode > 0.5 && a_s.z > u_prevT;
+  float fa = -1.0;
+  if (animated) {
+    if (u_mode < 0.5) fa = age;
+    else if (fresh) fa = u_wall - (a_s.z - u_prevT) / max(u_tEnd - u_prevT, 1e-3) * u_spread;
+  }
+  vec3 p = projectPx(radians(a_s.xy));
+  if (age < 0.0 || age > u_window || p.z < 0.0 || (fresh && animated && fa < 0.0)) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  bool flashing = fa >= 0.0 && fa < u_flash;
+  float r = u_dot * (1.0 + 0.9 * a_s.w);
+  float young = 1.0 - smoothstep(0.0, 0.06, age / u_window);
+  float halfSize = r * (1.0 + 2.2 * young) + 1.5;
+  if (flashing) halfSize = max(halfSize, u_glow * 1.6);
+  v_px = a_corner * halfSize;
+  v_age = age / u_window;
+  v_fa = flashing ? fa : -1.0;
+  v_e = a_s.w;
+  v_seed = fract(a_r * 7.13 + a_s.z * 0.618);
+  v_r = r;
+  gl_Position = vec4((p.xy + v_px) / (0.5 * u_vp.xy), 0.0, 1.0);
+}`;
+
+export const STRIKE_FS = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_px;
+in float v_age;
+in float v_fa;
+in float v_e;
+in float v_seed;
+in float v_r;
+out vec4 o_color;
+uniform float u_flash;
+uniform float u_glow;
+uniform float u_gain;
+
+vec3 ageColor(float a) {
+  // white -> pale gold -> amber -> orange -> crimson across the window
+  vec3 c0 = vec3(1.0), c1 = vec3(1.0, 0.95, 0.66), c2 = vec3(1.0, 0.76, 0.24), c3 = vec3(1.0, 0.48, 0.17), c4 = vec3(0.88, 0.2, 0.31);
+  if (a < 0.03) return mix(c0, c1, a / 0.03);
+  if (a < 0.17) return mix(c1, c2, (a - 0.03) / 0.14);
+  if (a < 0.5) return mix(c2, c3, (a - 0.17) / 0.33);
+  return mix(c3, c4, (a - 0.5) / 0.5);
+}
+
+float h1(float s, float k) { return fract(sin((s + k) * 91.345) * 47453.5453); }
+
+// Lightning flickers: a first return stroke and up to three more, each a sharp spike with a fast decay.
+float flicker(float t, float seed) {
+  float env = 0.0, start = 0.0;
+  int strokes = 1 + int(floor(h1(seed, 1.0) * 3.99));
+  for (int k = 0; k < 4; k++) {
+    if (k >= strokes) break;
+    float amp = k == 0 ? 1.0 : 0.4 + 0.5 * h1(seed, float(k) + 2.0);
+    float dt = t - start;
+    if (dt >= 0.0) env = max(env, amp * exp(-dt / 0.04));
+    start += 0.05 + 0.11 * h1(seed, float(k) + 7.0);
+  }
+  return env + 0.12 * exp(-t / 0.28);
+}
+
+void main() {
+  float d = length(v_px);
+  vec3 col = ageColor(v_age);
+  float fade = 1.0 - smoothstep(0.86, 1.0, v_age);
+  float aDot = (1.0 - smoothstep(v_r - 0.8, v_r + 0.8, d)) * mix(1.0, 0.5, v_age) * fade;
+  float rim = smoothstep(v_r - 0.6, v_r + 0.4, d) * (1.0 - smoothstep(v_r + 0.4, v_r + 1.6, d)) * 0.55 * fade;
+  float young = 1.0 - smoothstep(0.0, 0.06, v_age);
+  vec3 glow = col * exp(-pow(d / (v_r * 2.4), 2.0)) * 0.2 * young;
+  vec3 rgb = col * aDot + glow;
+  float a = aDot + rim * (1.0 - aDot);
+  if (v_fa >= 0.0) {
+    float u = v_fa / u_flash;
+    float env = flicker(v_fa, v_seed) * u_gain * (0.7 + 0.5 * v_e);
+    vec3 bolt = vec3(0.84, 0.9, 1.0);
+    rgb += bolt * (exp(-pow(d / (u_glow * 0.16), 2.0)) * 0.8 + exp(-pow(d / (u_glow * 0.62), 2.0)) * 0.13) * env;
+    float rr = mix(3.0, u_glow * 0.95, 1.0 - pow(1.0 - u, 3.0));
+    rgb += bolt * exp(-pow((d - rr) / 1.0, 2.0)) * 0.24 * (1.0 - u) * (1.0 - u) * u_gain;
+    rgb += vec3(1.0) * (1.0 - smoothstep(v_r * 1.3 - 0.6, v_r * 1.3 + 0.6, d)) * env;
+  }
+  if (a < 0.003 && max(rgb.r, max(rgb.g, rgb.b)) < 0.003) discard;
+  o_color = vec4(rgb, a);
+}`;

@@ -20,6 +20,8 @@ import { PointCard } from "./ui/pointcard.js";
 import { Search } from "./ui/search.js";
 import { toast, toastError } from "./ui/toast.js";
 import { AlertsLayer } from "./alerts-layer.js";
+import { Lightning } from "./lightning.js";
+import { Fronts } from "./fronts.js";
 import * as pwa from "./pwa.js";
 
 const splashMsg = (t) => { const m = $("#splash .msg"); if (m) m.textContent = t; };
@@ -68,17 +70,23 @@ class App {
     this.overlay.setPoints(this.points);
     this.layers = new Layers(this);
     this.alerts = new AlertsLayer(this);
+    this.lightning = new Lightning(this);
+    this.fronts = new Fronts(this);
     this.buildUI();
     this.bindLayers();
     this.bindControls();
     this.bindKeys();
     this.startEvents();
 
+    const deepLink = hashParams();  // read before the app starts rewriting the hash with its own state
     const initial = this.initialSource();
     await this.setSource(initial.source, { fhrTarget: initial.fhr });
     if (this.prefs.alerts !== false) this.alerts.setEnabled(true);
+    this.bindOverlays();
+    if (this.prefs.lightning) this.setLightning(true);
+    if (this.prefs.fronts) this.setFronts(true);
     if (this.prefs.liveClouds !== false) this.loadLiveClouds();
-    this.handleDeepLink();
+    if (["point", "alert", "layer", "model", "ll"].some((k) => deepLink.has(k))) this.handleDeepLink(deepLink);
     window.addEventListener("hashchange", () => this.handleDeepLink());
     r.requestRender();
     // hide the splash once the globe has drawn
@@ -201,6 +209,8 @@ class App {
         h("button", { class: cam.mode === m ? "sel" : "", style: { flex: 1 }, onclick: () => { this.setMode(m); render(); } }, l)));
       menu.replaceChildren(h("div", { style: { padding: "6px 6px 4px" } }, modeSeg),
         row("alert", "Weather alerts", "NWS warnings and advisories", "alerts", true, (v) => this.alerts.setEnabled(v)),
+        row("bolt", "Lightning", "Live GOES satellite strikes; follows radar loops", "lightning", false, (v) => this.setLightning(v)),
+        row("front", "Fronts", "WPC analysis and 48-hour forecast fronts", "fronts", false, (v) => this.setFronts(v)),
         row("cloud", "Live clouds", "Latest satellite clouds on the globe", "liveClouds", true, (v) => (v ? this.loadLiveClouds() : this.clearLiveClouds())),
         row("wind", "Wind animation", "Flowing particles on wind layers", "particles", true, () => this.layers.show(this.layers.index, { crossfade: false })),
         row("pin", "Place labels", "Cities and towns", "cities", true, (v) => { this.overlay.showCities = v; this.overlay.touch(); }),
@@ -281,13 +291,20 @@ class App {
     if (src.type !== "sat") { if (this.prefs.liveClouds !== false) this.loadLiveClouds(); else this.clearLiveClouds(); }
         try { await this.layers.setSource({ ...src, fhr: fhrTarget }); } catch (err) { toastError(err, "Couldn't load that layer"); }
     if (this.alerts?.enabled) this.alerts.draw();
+    this.syncOverlays(null);
     this.updateHash();
   }
 
   bindLayers() {
     const L = this.layers;
     L.addEventListener("steps", (e) => this.timeline.setSteps(e.detail));
-    L.addEventListener("index", (e) => { this.timeline.setIndex(e.detail.index, e.detail.step); this.updateHash(); });
+    L.addEventListener("index", (e) => {
+      this.timeline.setIndex(e.detail.index, e.detail.step);
+      this.updateHash();
+      this.syncOverlays(this._lastIndex);
+      this._lastIndex = e.detail.index;
+    });
+    L.addEventListener("source", () => { this._lastIndex = null; });
     L.addEventListener("frame", () => { this.card.update(); this.timeline.renderLoaded(); this.updateAttribution(); });
     L.addEventListener("loaded", throttle(() => this.timeline.renderLoaded(), 200));
     L.addEventListener("loading", (e) => {
@@ -361,6 +378,7 @@ class App {
     this.playing = false;
     clearTimeout(this._play);
     this.timeline?.setPlaying(false);
+    this.syncOverlays(null);
   }
 
   // ------------------------------------------------------------------ map interaction
@@ -385,11 +403,13 @@ class App {
       if (hoverRaf) return;
       hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; this.hover(hoverPt); });
     });
-    c.addEventListener("move", () => { this.readout.classList.remove("on"); if (this.introFly) this.introFly = false; });
+    c.addEventListener("move", () => { this.readout.classList.remove("on"); if (this.introFly) this.introFly = false; this.lightning?.wake(); });
+    c.addEventListener("tap", () => this.lightning?.wake());
     // settle detection: any camera change, debounced
     let lastV = -1;
     const settled = debounce(() => {
       this.layers.onCameraSettled();
+      this.lightning?.onCameraSettled();
       this.saveView();
       this.updateHash();
       if (Math.abs(this._tlLat - cam.lat) > 8 || Math.abs(this._tlLon - cam.lon) > 15) { this._tlLat = cam.lat; this._tlLon = cam.lon; this.timeline.setSteps(this.layers.steps); this.timeline.setIndex(this.layers.index, this.layers.step()); }
@@ -474,6 +494,79 @@ class App {
   async loadPoints() {
     this.points = await API.get("/points");
     this.overlay.setPoints(this.points);
+  }
+
+  // ------------------------------------------------------------------ observation overlays (lightning, fronts)
+  bindOverlays() {
+    const legendRows = () => this.legend.renderOverlays(this.lightning.info(), this.fronts.info());
+    this.lightning.addEventListener("status", () => { legendRows(); if (this.card.el) this.card.update(); });
+    this.fronts.addEventListener("status", legendRows);
+    this.lightning.addEventListener("flash", () => {
+      const ic = document.querySelector(".legend .ovl-ic.bolt");
+      if (!ic) return;
+      ic.classList.remove("flash");
+      void ic.offsetWidth;
+      ic.classList.add("flash");
+    });
+    // the live window slides even when nothing else changes
+    setInterval(() => { if (!document.hidden && this.lightning.enabled) { this.syncOverlays(null, true); } }, 60000);
+  }
+
+  async setLightning(on) {
+    await this.lightning.setEnabled(on);
+    if (on && !this.lightning.available) toast("Lightning is turned off on this server", { type: "error" });
+    this.syncOverlays(null);
+    this.updateAttribution();
+    this.card.update();
+  }
+
+  async setFronts(on) {
+    await this.fronts.setEnabled(on);
+    this.syncOverlays(null);
+    this.updateAttribution();
+  }
+
+  // Keep lightning and fronts in step with the displayed time.
+  // prevIndex: the previous timeline index, so a single step forward can flash the strikes it reveals.
+  syncOverlays(prevIndex, quiet = false) {
+    const s = this.state.source, L = this.layers;
+    if (!s || !L) return;
+    const step = L.step();
+    const nowS = Date.now() / 1000;
+    const T = step ? step.time.getTime() / 1000 : nowS;
+    if (this.lightning.enabled) {
+      let mode = "off", window = 1800, prevT = null, spread = 0.9;
+      if (s.type === "model") {
+        if (Math.abs(T - nowS) <= 5400) mode = "live";
+      } else {
+        const st = L.steps;
+        const spacing = st.length > 1 ? (st[st.length - 1].time - st[0].time) / 1000 / (st.length - 1) : 600;
+        window = Math.max(600, Math.min(3600, spacing * 2.5));
+        // the newest radar or satellite frame shows live lightning; stepping back shows what led up to each frame
+        if (L.index === st.length - 1 && !this.playing) { mode = "live"; window = Math.min(1800, Math.max(900, window)); }
+        else {
+          mode = "step";
+          if (prevIndex != null && L.index === prevIndex + 1 && st[prevIndex]) {
+            prevT = st[prevIndex].time.getTime() / 1000;
+            spread = this.playing ? Math.min(1.6, (this.frameMs() / 1000) * 0.85) : 0.9;
+          }
+        }
+      }
+      if (!(quiet && mode === "step")) this.lightning.sync({ mode, T, prevT, window, spread });
+    }
+    if (this.fronts.enabled) {
+      const modelCenters = s.type === "model" && (L.product()?.contours || []).some((c) => c.hilo && c.models.includes(s.model));
+      this.fronts.sync(T * 1000, { centers: !modelCenters });
+    }
+  }
+
+  lightningLine(p) {
+    const n = this.lightning?.nearest(p.lon, p.lat);
+    if (!n) return null;
+    const mins = Math.round(n.window / 60);
+    if (n.km == null) return { text: `No lightning within ${fmt("vis", 80000)} in the last ${mins} min`, close: false };
+    const ago = n.age < 90 ? "just now" : `${Math.round(n.age / 60)} min ago`;
+    return { text: `Lightning ${fmt("vis", n.km * 1000)} away · ${ago}`, close: n.km < 16 };
   }
 
   // ------------------------------------------------------------------ live clouds
@@ -567,8 +660,8 @@ class App {
   }
 
   // ------------------------------------------------------------------ deep links & hash state
-  handleDeepLink() {
-    const hp = hashParams();
+  handleDeepLink(params = null) {
+    const hp = params || hashParams();
     if (hp.get("point")) {
       const p = this.points.find((x) => x.id === +hp.get("point"));
       if (p) this.selectPoint({ ...p }, { fly: true, tab: hp.get("tab") === "meteogram" ? "forecast" : hp.get("tab") || "forecast" });
@@ -607,6 +700,8 @@ class App {
     else if (s?.type === "radar") t = "NOAA MRMS";
     else if (s?.type === "sat") t = this.catalog.satAttribution;
     if (this.prefs.liveClouds !== false && s?.type !== "sat") t += " · Clouds: SSEC RealEarth";
+    if (this.lightning?.enabled) t += " · Lightning: NOAA GOES GLM";
+    if (this.fronts?.enabled) t += " · Fronts: NOAA WPC";
     this.attrib.textContent = t;
   }
 

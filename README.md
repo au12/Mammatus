@@ -6,7 +6,7 @@
 
 <p align="center">
   A self-hosted weather model viewer on a living globe.<br>
-  HRRR · RRFS · GFS · ECMWF IFS · ECMWF AIFS · MRMS radar · global satellite · NWS alerts
+  HRRR · RRFS · GFS · ECMWF IFS · ECMWF AIFS · MRMS radar · global satellite · GOES lightning · WPC fronts · NWS alerts
 </p>
 
 <p align="center">
@@ -32,6 +32,15 @@ family can use it from anywhere.
   between hours, decodes frames off the main thread and draws contours and labels without blocking.
 - **Live radar & satellite.** MRMS composite reflectivity every few minutes; global IR / visible / water
   vapor mosaics that also appear as live clouds on the globe.
+- **Lightning.** Every flash seen by the GOES-East and GOES-West Geostationary Lightning Mappers, about a
+  minute behind real time. Strikes replay in their true rhythm: each one flickers through its return
+  strokes, blooms softly and leaves a faint ring, then cools from white to crimson as it ages. In busy
+  storms only a few strikes per second flash, so it stays a gentle shimmer rather than strobing. Step
+  or play a radar or satellite loop and the lightning that led up to each frame flashes along with it.
+  Tap anywhere for the nearest strike ("Lightning 6 mi away · 3 min ago").
+- **Fronts.** NOAA WPC's hand-drawn surface analysis (every 3 hours) and its 12–48 hour forecast fronts,
+  matched to the timeline: cold, warm, stationary and occluded fronts with proper symbols, troughs, and
+  WPC highs and lows when the map isn't already showing model pressure centers.
 - **Point forecasts.** Tap anywhere: the value under your finger, active NWS alerts, then a multi-model
   meteogram (HRRR, RRFS, NBM, GFS, ECMWF, AIFS, ICON, GEM, UKMO) with daily consensus highs/lows,
   model spread, accumulated precip and snow, wind, pressure and cloud cover.
@@ -54,13 +63,16 @@ family can use it from anywhere.
 |---|---|
 | ![GFS pressure and precipitation type](docs/screenshots/desktop-mslp.jpg) | ![HRRR wind with animated flow](docs/screenshots/desktop-wind.jpg) |
 | GFS precipitation type with isobars and pressure centers | HRRR 10 m wind with animated particles |
+| ![GOES lightning over South America](docs/screenshots/desktop-lightning.jpg) | ![WPC fronts with GFS pressure](docs/screenshots/desktop-fronts.jpg) |
+| Live GOES lightning over the Amazon, with the infrared satellite | WPC fronts over GFS precipitation type and isobars |
 | ![Regional view with point card](docs/screenshots/desktop-regional.jpg) | ![Skew-T sounding](docs/screenshots/desktop-sounding.jpg) |
 | HRRR simulated radar at county level, tap for details | Skew-T and indices (demo profile) |
 
 <p align="center">
-  <img src="docs/screenshots/mobile-map.jpg" width="30%" alt="Mobile map">
-  <img src="docs/screenshots/mobile-globe.jpg" width="30%" alt="Mobile globe">
-  <img src="docs/screenshots/mobile-forecast.jpg" width="30%" alt="Mobile meteogram">
+  <img src="docs/screenshots/mobile-map.jpg" width="23%" alt="Mobile map">
+  <img src="docs/screenshots/mobile-fronts.jpg" width="23%" alt="Mobile fronts">
+  <img src="docs/screenshots/mobile-globe.jpg" width="23%" alt="Mobile globe">
+  <img src="docs/screenshots/mobile-forecast.jpg" width="23%" alt="Mobile meteogram">
 </p>
 
 <p align="center"><sub>Meteogram and sounding screenshots use demo data; the maps are real model output.</sub></p>
@@ -118,6 +130,8 @@ for an Nginx Proxy Manager walkthrough and the security model.
 | `MAMMATUS_HSTS` | `false` | Send `Strict-Transport-Security` |
 | `MAMMATUS_SESSION_DAYS` | `30` | Session lifetime |
 | `MAMMATUS_CONTACT` | — | Contact email for NOAA/NWS User-Agent and Web Push |
+| `MAMMATUS_LIGHTNING` | `east,west` | GOES lightning sources: `east,west`, `east` (covers the lower 48) or `off` |
+| `MAMMATUS_LIGHTNING_BACKFILL_MIN` | `30` | History fetched when someone turns lightning on (older radar frames fetch theirs on demand) |
 | `MAMMATUS_OPENMETEO_URL` | `https://api.open-meteo.com` | Point forecasts & soundings (self-hosted Open-Meteo works) |
 | `MAMMATUS_OPENMETEO_KEY` | — | Optional commercial Open-Meteo key |
 | `MAMMATUS_ADMIN_USER` / `_PASSWORD` | — | Create the first admin without the setup code |
@@ -131,6 +145,12 @@ for an Nginx Proxy Manager walkthrough and the security model.
   ecCodes, derived (winds rotated to earth-relative, accumulations, Kuchera snow, precip type, vorticity…),
   quantized to 16-bit, delta-coded and gzip-compressed into three levels of detail. Mirrors are tried in
   order (AWS → Google Cloud → NOMADS/ECMWF). Everything lives in SQLite and a size-capped disk cache.
+- **Lightning:** GLM publishes 20-second netCDF files (170–360 KB, of which the flashes are a few KB).
+  Mammatus only downloads them while someone has the layer on (about 100 MB per hour for both
+  satellites, 65 MB for East alone), splits the overlap between the satellites at the longitude
+  closest to each one's nadir, and serves 10-minute chunks of 7 bytes per flash. Complete chunks are
+  immutable, so browsers download each one once; the live edge is polled for just the newest strikes.
+  On the map, frames are only drawn while a visible strike is flashing.
 - **Frontend:** dependency-free ES modules and a custom WebGL2 renderer: an analytic globe/Mercator
   projection with exact inverse per pixel, data textures sampled in-shader on the model's native grid
   (lat/lon or Lambert conformal), perceptual OKLab color ramps, GPU particle advection with transform
@@ -153,7 +173,8 @@ Basemap, star and texture assets are prebuilt in `mammatus/static/data` and `mam
 ## Credits
 
 Model data: NOAA (HRRR, RRFS, GFS via the NOAA Open Data Dissemination program) and ECMWF open data
-(IFS, AIFS; CC BY 4.0). Radar: NOAA MRMS. Satellite: courtesy of SSEC, University of Wisconsin–Madison
+(IFS, AIFS; CC BY 4.0). Radar: NOAA MRMS. Lightning: NOAA GOES-R Geostationary Lightning Mapper.
+Fronts: NOAA/NWS Weather Prediction Center. Satellite: courtesy of SSEC, University of Wisconsin–Madison
 (RealEarth). Alerts: National Weather Service. Point forecasts and soundings: Open-Meteo (CC BY 4.0).
 Basemap: Natural Earth, US Census via us-atlas. Earth imagery: NASA Blue Marble & Black Marble.
 Stars: Yale Bright Star Catalog. QR codes: qrcode-generator (MIT).

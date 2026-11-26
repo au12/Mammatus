@@ -19,17 +19,19 @@ export class PointCard {
     const app = this.app;
     const saved = app.savedPoint(p);
     this.valueEl = h("div", { class: "big num" });
+    this.nearEl = h("div", { class: "near" });
     this.alertsEl = h("div", { class: "alerts" });
     this.el = h("div", { class: "pointcard glass-strong", role: "dialog", "aria-label": "Point details" },
       h("div", { class: "pc-h" },
         h("div", { class: "t" }, h("b", {}, saved?.name || p.name || fmtLatLon(p.lat, p.lon)), h("small", {}, p.name || saved ? fmtLatLon(p.lat, p.lon) : "")),
         h("button", { class: "closex", "aria-label": "Close", html: icon("x", 16), onclick: () => this.close() })),
-      this.valueEl, this.alertsEl,
+      this.valueEl, this.nearEl, this.alertsEl,
       h("div", { class: "pc-actions" },
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "forecast" }) }, h("span", { html: icon("chart", 15) }), "Forecast"),
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "sounding" }) }, h("span", { html: icon("skewt", 15) }), "Sounding"),
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "alerts" }) }, h("span", { html: icon("alert", 15) }), "Alerts")));
     document.getElementById("ui").append(this.el);
+    document.body.classList.add("card-open");
     this.update();
     this.place();
     this.marker.style.display = "";
@@ -44,6 +46,13 @@ export class PointCard {
     else {
       this.valueEl.style.display = "";
       this.valueEl.innerHTML = v ? this.app.formatSample(v, true) : `<span style="font-size:15px;color:var(--text-3);font-weight:500">${this.app.layers.current ? "No value here" : "Loading…"}</span>`;
+    }
+    const near = this.app.lightningLine?.(this.p);
+    this.nearEl.style.display = near ? "" : "none";
+    if (near) {
+      this.nearEl.classList.toggle("close", near.close);
+      this.nearEl.innerHTML = `${icon("bolt", 15)}<span></span>`;
+      this.nearEl.lastChild.textContent = near.text;
     }
   }
 
@@ -82,6 +91,7 @@ export class PointCard {
   close(clearMarker = true) {
     this.el?.remove();
     this.el = null;
+    document.body.classList.remove("card-open");
     if (clearMarker) { this.p = null; this.marker.style.display = "none"; }
   }
 }

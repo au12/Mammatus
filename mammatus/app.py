@@ -37,6 +37,8 @@ from .data.openmeteo import OpenMeteo
 from .data.radar import RadarService
 from .data.runs import RunsService
 from .data.satellite import SatelliteService
+from .data.lightning import LightningService
+from .data.fronts import FrontsService
 from .db import get_db
 from .events import EventHub
 from .security import RateLimiter, client_ip, request_host, request_scheme
@@ -215,12 +217,15 @@ async def lifespan(app: FastAPI):
         runs=runs, frames=frames, radar=RadarService(frames.cache, frames.pool),
         sat=SatelliteService(frames.cache, frames.pool), nws=nws, om=om, vapid=vapid, events=events,
         notifier=notifier, engine=engine, started=time.time(), models_enabled=set(m.id for m in runs.models),
+        lightning=LightningService(settings.cache_dir, frames.pool, settings.lightning, settings.lightning_backfill_min),
+        fronts=FrontsService(),
     )
     app.state.svc = svc
     background = os.environ.get("MAMMATUS_BACKGROUND", "1") != "0"  # tests turn polling off
     if background:
         runs.start()
         svc.radar.start()
+        svc.lightning.start()
         engine.start()
     cleanup = asyncio.create_task(_cleanup_loop(svc), name="cache-cleanup")
     log.info("Mammatus %s ready on port %s (models: %s)", __version__, settings.port, ", ".join(svc.models_enabled))
@@ -228,6 +233,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         cleanup.cancel()
+        await svc.lightning.stop()
         await engine.stop()
         await runs.stop()
         await close_client()

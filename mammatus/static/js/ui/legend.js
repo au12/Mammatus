@@ -2,6 +2,7 @@
 import { h, esc } from "../util.js";
 import { cssGradient, legendPos } from "../colormaps.js";
 import { toDisplay, label, units } from "../units.js";
+import { when } from "../time.js";
 
 // Units the server writes each colormap's ticks in -> canonical.
 const REF = {
@@ -22,25 +23,41 @@ function niceLabel(kind, canon, cmapId, raw) {
   return a >= 10 ? String(Math.round(d)) : a >= 1 ? String(Math.round(d * 10) / 10) : String(Math.round(d * 100) / 100);
 }
 
+const BOLT = '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M13.2 2.8 5.8 13.2h5.4l-1.4 8 7.4-10.4h-5.4z" fill="#ffd36b" stroke="#ffb52e" stroke-width="1" stroke-linejoin="round"/></svg>';
+const FRONT_KEY = '<svg viewBox="0 0 44 14" width="44" height="14"><path d="M1 10h21" stroke="#4d8dff" stroke-width="2.2"/><path d="m6 10 3.2-5.2L12.4 10z" fill="#4d8dff"/><path d="M22 10h21" stroke="#ff4f62" stroke-width="2.2"/><path d="M29.5 10a3.6 3.6 0 0 1 7.2 0z" fill="#ff4f62"/></svg>';
+const hhz = (d) => when(d);
+
 export class Legend {
   constructor(app) {
     this.app = app;
     this.el = h("div", { class: "legend glass" });
+    this.main = h("div");
+    this.extra = h("div", { class: "ovl-rows" });
+    this.el.append(this.main, this.extra);
     document.getElementById("ui").append(this.el);
     this.marker = null;
   }
 
+  updateVisibility() {
+    this.el.style.display = this.main.childNodes.length || this.extra.childNodes.length ? "" : "none";
+  }
+
   render() {
+    this.renderMain();
+    this.updateVisibility();
+  }
+
+  renderMain() {
     const app = this.app, s = app.state.source;
-    this.el.replaceChildren();
+    const el = this.main;
+    el.replaceChildren();
     this.marker = null;
-    this.el.style.display = "";
     if (!s || s.type === "sat") {
       if (s?.type === "sat") {
         const sp = app.catalog.satellite.find((x) => x.id === s.product);
-        this.el.append(h("div", { class: "lh" }, h("b", {}, sp?.name || "Satellite"), h("span", {}, "SSEC RealEarth")),
+        el.append(h("div", { class: "lh" }, h("b", {}, sp?.name || "Satellite"), h("span", {}, "SSEC RealEarth")),
           h("div", { class: "method", style: { marginTop: 0 } }, sp?.desc || ""));
-      } else this.el.style.display = "none";
+      }
       return;
     }
     let cmapId, title, desc = "";
@@ -55,7 +72,7 @@ export class Legend {
     this.kind = kind; this.cm = cm;
     if (cm.mode === "category") {
       const cols = cssGradient(cm);
-      this.el.append(h("div", { class: "lh" }, h("b", {}, title), h("span", {}, "lighter = lighter rate")),
+      el.append(h("div", { class: "lh" }, h("b", {}, title), h("span", {}, "lighter = lighter rate")),
         h("div", { class: "cats" }, ...cm.categories.map((c, i) => h("div", {}, h("i", { style: { background: `linear-gradient(90deg, ${c.stops[0][1]}, ${cols[i]}, ${c.stops[c.stops.length - 1][1]})` } }), c.name))));
     } else {
       const bar = h("div", { class: "bar", style: { background: cssGradient(cm) } });
@@ -69,9 +86,40 @@ export class Legend {
         if (pos <= 0.01 || pos >= 0.99) return;
         ticks.append(h("span", { style: { left: `${pos * 100}%` } }, niceLabel(kind, canon, cmapId, t)));
       });
-      this.el.append(h("div", { class: "lh" }, h("b", {}, title), h("span", {}, label(kind))), barWrap, ticks);
+      el.append(h("div", { class: "lh" }, h("b", {}, title), h("span", {}, label(kind))), barWrap, ticks);
     }
-    if (desc) this.el.append(h("div", { class: "method" }, desc));
+    if (desc) el.append(h("div", { class: "method" }, desc));
+  }
+
+  // Rows for the observation overlays (lightning, fronts) under the main legend.
+  renderOverlays(lightning, fronts) {
+    const rows = [];
+    if (lightning?.enabled) {
+      const mins = Math.round((lightning.window || 1800) / 60);
+      let status;
+      if (!lightning.available) status = h("span", { class: "ovl-note" }, "Turned off on this server");
+      else if (lightning.warming) status = h("span", { class: "ovl-note" }, "Connecting to GOES…");
+      else if (lightning.mode === "off") status = h("button", { class: "ovl-note ovl-link", title: "Lightning is live data; jump the timeline to now", onclick: () => this.app.jumpToNow() }, "Jump to now");
+      else status = h("span", { class: "ovl-count num" }, `${lightning.count.toLocaleString()} in view`);
+      rows.push(h("div", { class: "ovl" },
+        h("span", { class: `ovl-ic bolt${lightning.mode === "live" && !lightning.warming ? " live" : ""}`, html: BOLT, title: lightning.mode === "live" ? "Live" : "" }),
+        h("b", {}, "Lightning"),
+        lightning.mode !== "off" && lightning.available && !lightning.warming
+          ? h("span", { class: "ovl-ramp" }, h("i"), h("small", {}, "now"), h("small", {}, `${mins} min`)) : null,
+        status));
+    }
+    if (fronts?.enabled) {
+      const s = fronts.set;
+      let what;
+      if (fronts.error && !s) what = "Unavailable";
+      else if (!s) what = "None near this time";
+      else if (s.kind === "analysis") what = `WPC analysis · ${hhz(s.valid)}`;
+      else what = `WPC ${s.hours}-h forecast · ${hhz(s.valid)}`;
+      rows.push(h("div", { class: "ovl" }, h("span", { class: "ovl-ic", html: FRONT_KEY }), h("b", {}, "Fronts"),
+        h("span", { class: s ? "ovl-count" : "ovl-note" }, what)));
+    }
+    this.extra.replaceChildren(...rows);
+    this.updateVisibility();
   }
 
   hover(value) {

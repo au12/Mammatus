@@ -162,6 +162,41 @@ async def sat_image(product: str, stamp: str, request: Request, user: CurrentUse
     return FileResponse(path, media_type="image/webp", headers={"Cache-Control": IMMUTABLE})
 
 
+@router.get("/lightning/status")
+def lightning_status(request: Request, user: CurrentUser = Depends(require_user)):
+    s = svc(request).lightning
+    if not s.enabled:
+        return JSONResponse({"enabled": False}, headers={"Cache-Control": "no-store"})
+    return JSONResponse(s.status(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/lightning/chunk/{t0}")
+def lightning_chunk(t0: int, request: Request, after: float | None = Query(None),
+                    user: CurrentUser = Depends(require_user)):
+    s = svc(request).lightning
+    if not s.enabled:
+        raise HTTPException(404, "Lightning is turned off on this server")
+    now = time.time()
+    if t0 > now + 600 or t0 < now - 7 * 3600:
+        raise HTTPException(404, "Outside the lightning history")
+    try:
+        blob, final = s.chunk(t0, after)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    headers = {"Content-Encoding": "gzip", "X-Final": "1" if final else "0",
+               "Cache-Control": IMMUTABLE if final else "no-store"}
+    return Response(blob, media_type="application/octet-stream", headers=headers)
+
+
+@router.get("/fronts")
+async def fronts(request: Request, user: CurrentUser = Depends(require_user)):
+    try:
+        data = await svc(request).fronts.sets()
+    except FetchError as exc:
+        raise _upstream_error(exc)
+    return JSONResponse(data, headers={"Cache-Control": "private, max-age=300"})
+
+
 @router.get("/alerts")
 async def alerts(request: Request, user: CurrentUser = Depends(require_user)):
     try:

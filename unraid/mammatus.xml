@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/au12/Mammatus/issues</Support>
   <Project>https://github.com/au12/Mammatus</Project>
-  <Overview>Mammatus is a self-hosted weather model viewer. HRRR, RRFS, GFS, ECMWF IFS and AIFS maps on a realistic 3D globe that morphs into a flat map, with live radar and satellite, NWS alerts, multi-model meteograms, skew-T soundings, user accounts and real push notifications. Put it behind your reverse proxy (HTTPS) for remote access and install it as an app on phones.&#xD;
+  <Overview>Mammatus is a self-hosted weather model viewer. HRRR, RRFS, GFS, ECMWF IFS and AIFS maps on a realistic 3D globe that morphs into a flat map, with live radar and satellite, GOES lightning with animated strikes, WPC fronts, NWS alerts, multi-model meteograms, skew-T soundings, user accounts and real push notifications. Put it behind your reverse proxy (HTTPS) for remote access and install it as an app on phones.&#xD;
 &#xD;
 First run: open the WebUI and use the one-time setup code printed in the container log, or set MAMMATUS_ADMIN_USER / MAMMATUS_ADMIN_PASSWORD.</Overview>
   <Category>Tools: Productivity: Other:</Category>
@@ -28,6 +28,8 @@ First run: open the WebUI and use the one-time setup code printed in the contain
   <Config Name="Time zone" Target="TZ" Default="America/New_York" Mode="" Description="Default display time zone (each user can change theirs)." Type="Variable" Display="always" Required="false" Mask="false">America/New_York</Config>
   <Config Name="Contact email" Target="MAMMATUS_CONTACT" Default="" Mode="" Description="Sent in the User-Agent to NOAA/NWS and used as the Web Push contact. Recommended." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="Models" Target="MAMMATUS_MODELS" Default="hrrr,rrfs,gfs,ecmwf,aifs" Mode="" Description="Comma-separated models to offer." Type="Variable" Display="advanced" Required="false" Mask="false">hrrr,rrfs,gfs,ecmwf,aifs</Config>
+  <Config Name="Lightning satellites" Target="MAMMATUS_LIGHTNING" Default="east,west" Mode="" Description="GOES lightning sources: east,west (Americas, Atlantic and Pacific), east (enough for the lower 48), or off. Data is only downloaded while someone has the lightning layer on (about 100 MB/hour for both, 65 MB/hour for east)." Type="Variable" Display="advanced" Required="false" Mask="false">east,west</Config>
+  <Config Name="Lightning backfill (min)" Target="MAMMATUS_LIGHTNING_BACKFILL_MIN" Default="30" Mode="" Description="History fetched when the lightning layer is first turned on (10-120). Older radar frames fetch their lightning on demand." Type="Variable" Display="advanced" Required="false" Mask="false">30</Config>
   <Config Name="Cache size (GB)" Target="MAMMATUS_CACHE_GB" Default="10" Mode="" Description="Upper bound for the on-disk frame cache." Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
   <Config Name="Trusted proxies" Target="MAMMATUS_TRUSTED_PROXIES" Default="" Mode="" Description="Addresses/CIDRs allowed to set X-Forwarded-For/Proto. Defaults to private networks; set to your proxy's IP (e.g. 10.0.10.2/32) to tighten." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="HSTS" Target="MAMMATUS_HSTS" Default="false" Mode="" Description="Send Strict-Transport-Security (only when always served over HTTPS)." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>

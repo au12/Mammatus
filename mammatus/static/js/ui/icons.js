@@ -47,6 +47,8 @@ const P = {
   phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
   send: '<path d="M4 12 20 4l-5 16-3.5-6.5z"/><path d="M11.5 13.5 20 4"/>',
   mountain: '<path d="m3 19.5 6.5-11 4 6 2.5-3.5 5 8.5z"/>',
+  bolt: '<path d="M13.2 2.8 5.8 13.2h5.4l-1.4 8 7.4-10.4h-5.4z"/>',
+  front: '<path d="M3 16c3.2-1.2 5.3-4.6 9-4.6s5.8 3.4 9 4.6"/><path d="m6.2 14.4-.9-3.3 3.1 1.6z" fill="currentColor"/><path d="M14.2 11.8a2 2 0 0 1 3.4 1.6" />',
 };
 
 export function icon(name, size = 20, extra = "") {

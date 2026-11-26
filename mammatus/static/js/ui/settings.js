@@ -46,6 +46,7 @@ function general(app, p) {
   p.append(h("h4", {}, "Time"), field("Time zone", tzSel, "Times across the app use this zone."));
   p.append(h("h4", {}, "Display"),
     toggleRow("Smooth transitions", "Cross-fade between forecast hours.", app.prefs.smooth !== false, (v) => app.savePref("smooth", v)),
+    toggleRow("Animate lightning", "New strikes flicker and glow. Off shows plain dots; also off when the system asks for reduced motion.", app.prefs.lightningAnim !== false, (v) => { app.savePref("lightningAnim", v); app.lightning.wake(); app.renderer.requestRender(); }),
     toggleRow("Battery saver", "Lower resolution and fewer particles. On by default for phones.", app.renderer.lowPower, (v) => { app.savePref("lowPower", v); toast("Battery saver changes apply after reload", { action: { label: "Reload", fn: () => location.reload() } }); }),
     toggleRow("Remember map position", "Reopen where you left off.", app.prefs.rememberView !== false, (v) => app.savePref("rememberView", v)));
   const opacity = h("input", { type: "range", min: 40, max: 100, value: Math.round((app.prefs.opacity ?? 0.88) * 100), style: { width: "100%", accentColor: "#c3a8ff" } });
@@ -318,7 +319,7 @@ function about(app, p) {
     h("div", { html: logoSVG({ size: 72 }) }), h("h3", { style: { margin: 0, fontWeight: 650, letterSpacing: ".02em" } }, "Mammatus"),
     h("span", { class: "note" }, `Version ${app.catalog.version}`)),
   h("h4", {}, "Data"),
-  h("p", { class: "note" }, "Model data: NOAA HRRR, RRFS and GFS via the NOAA Open Data Dissemination program; ECMWF IFS and AIFS open data (CC BY 4.0). Radar: NOAA MRMS. Satellite: courtesy of SSEC, University of Wisconsin–Madison (RealEarth). Alerts: National Weather Service. Point forecasts and soundings: Open-Meteo (CC BY 4.0). Basemap: Natural Earth and US Census via us-atlas. Earth imagery: NASA Blue Marble and Black Marble. Stars: Yale Bright Star Catalog."),
+  h("p", { class: "note" }, "Model data: NOAA HRRR, RRFS and GFS via the NOAA Open Data Dissemination program; ECMWF IFS and AIFS open data (CC BY 4.0). Radar: NOAA MRMS. Lightning: NOAA GOES-R Geostationary Lightning Mapper. Fronts: NWS Weather Prediction Center. Satellite: courtesy of SSEC, University of Wisconsin–Madison (RealEarth). Alerts: National Weather Service. Point forecasts and soundings: Open-Meteo (CC BY 4.0). Basemap: Natural Earth and US Census via us-atlas. Earth imagery: NASA Blue Marble and Black Marble. Stars: Yale Bright Star Catalog."),
   h("h4", {}, "Keyboard"),
   h("table", { class: "t" }, ...[["Space", "Play / pause"], ["← →", "Previous / next hour"], ["/", "Search"], ["L", "Layer picker"], ["G", "Globe / map"], ["F", "Forecast for the selected point"], ["Esc", "Close"]].map(([k, v]) => h("tr", {}, h("td", {}, h("span", { class: "kbd" }, k)), h("td", {}, v)))));
 }
