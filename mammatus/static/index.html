@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Mammatus</title>
+<meta name="description" content="Weather models on a living globe: HRRR, RRFS, GFS, ECMWF and AIFS maps, radar, satellite, meteograms and soundings.">
+<meta name="theme-color" content="#04060c">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mammatus">
+<meta name="referrer" content="same-origin">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/icons/icon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/app.css">
+<script type="module" src="/js/main.js"></script>
+</head>
+<body>
+<div id="splash">
+  <div class="inner">
+    <svg class="mm-logo mm-anim " viewBox="2 6 60 40" width="120" height="80" aria-hidden="true"><defs> <linearGradient id="mm0b" x1="0" y1="0" x2="0" y2="1"> <stop offset="0" stop-color="#565499"/><stop offset=".55" stop-color="#3a3a7e"/><stop offset="1" stop-color="#2e2e6a"/> </linearGradient> <radialGradient id="mm0f" cx=".55" cy="1" r="1.05"> <stop offset="0" stop-color="#ffe6c2"/><stop offset=".26" stop-color="#ffb3a7"/><stop offset=".56" stop-color="#b08ce4"/><stop offset=".9" stop-color="#3d3b84"/><stop offset="1" stop-color="#2e2e6a"/> </radialGradient> <radialGradient id="mm0k" cx=".55" cy="1" r="1.05"> <stop offset="0" stop-color="#f0ada3"/><stop offset=".45" stop-color="#8a74c6"/><stop offset=".9" stop-color="#34337a"/><stop offset="1" stop-color="#2b2b64"/> </radialGradient> <linearGradient id="mm0h" x1="0" y1="0" x2="0" y2="1"> <stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/> </linearGradient> </defs> <g class="mm-base"><path d="M8.5 27.5C5 27.5 4.2 23.2 7.4 21.9C7.2 17.6 11.6 15.6 15.2 17.1C16.6 12.6 23.2 11.4 26.4 14.6C28.9 10.4 36.4 10 38.9 14.2C42 11.6 48.4 12.6 49.6 16.8C53.6 15.7 58.4 18.3 57.3 22.2C60.2 23.3 59.6 27.5 55.8 27.5Z" fill="url(#mm0b)"/><path d="M8.5 27.5C5 27.5 4.2 23.2 7.4 21.9C7.2 17.6 11.6 15.6 15.2 17.1C16.6 12.6 23.2 11.4 26.4 14.6C28.9 10.4 36.4 10 38.9 14.2C42 11.6 48.4 12.6 49.6 16.8C53.6 15.7 58.4 18.3 57.3 22.2C60.2 23.3 59.6 27.5 55.8 27.5Z" fill="url(#mm0h)"/></g> <g class="mm-back"><path class="mm-lobe" style="--d:0.38s" d="M13.6 26.6 A6.1000000000000005 5.61 0 0 0 25.8 26.6 Z" fill="url(#mm0k)"/><path class="mm-lobe" style="--d:0.5s" d="M25.6 26.6 A6.099999999999998 5.86 0 0 0 37.8 26.6 Z" fill="url(#mm0k)"/><path class="mm-lobe" style="--d:0.62s" d="M37.6 26.6 A6.099999999999998 5.61 0 0 0 49.8 26.6 Z" fill="url(#mm0k)"/></g> <g class="mm-front"><path class="mm-lobe" style="--d:0.04s" d="M6.6 27.3 A6.6000000000000005 6.47 0 0 0 19.8 27.3 Z" fill="url(#mm0f)"/><path class="mm-lobe" style="--d:0.14s" d="M18.6 27.3 A6.800000000000001 7.34 0 0 0 32.2 27.3 Z" fill="url(#mm0f)"/><path class="mm-lobe" style="--d:0.24s" d="M31 27.3 A6.800000000000001 7.48 0 0 0 44.6 27.3 Z" fill="url(#mm0f)"/><path class="mm-lobe" style="--d:0.32s" d="M43.4 27.3 A6.800000000000001 6.66 0 0 0 57 27.3 Z" fill="url(#mm0f)"/></g></svg>
+    <div class="word">MAMMATUS</div>
+    <div class="msg" role="status"></div>
+  </div>
+</div>
+<canvas id="globe" aria-label="Weather map. Drag to move, scroll or pinch to zoom, tap for details."></canvas>
+<canvas id="overlay" aria-hidden="true"></canvas>
+<div id="ui"></div>
+<noscript><p style="position:fixed;inset:0;display:grid;place-items:center;color:#aab3c6;font:15px system-ui">Mammatus needs JavaScript.</p></noscript>
+</body>
+</html>

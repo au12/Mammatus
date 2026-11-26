@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Mammatus</Name>
+  <Repository>ghcr.io/au12/mammatus:latest</Repository>
+  <Registry>https://github.com/au12/Mammatus/pkgs/container/mammatus</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/au12/Mammatus/issues</Support>
+  <Project>https://github.com/au12/Mammatus</Project>
+  <Overview>Mammatus is a self-hosted weather model viewer. HRRR, RRFS, GFS, ECMWF IFS and AIFS maps on a realistic 3D globe that morphs into a flat map, with live radar and satellite, NWS alerts, multi-model meteograms, skew-T soundings, user accounts and real push notifications. Put it behind your reverse proxy (HTTPS) for remote access and install it as an app on phones.&#xD;
+&#xD;
+First run: open the WebUI and use the one-time setup code printed in the container log, or set MAMMATUS_ADMIN_USER / MAMMATUS_ADMIN_PASSWORD.</Overview>
+  <Category>Tools: Productivity: Other:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/au12/Mammatus/main/unraid/mammatus.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/au12/Mammatus/main/icon.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>A reverse proxy with HTTPS (for example Nginx Proxy Manager) is needed for remote access and push notifications.</Requires>
+  <Config Name="WebUI port" Target="8080" Default="8080" Mode="tcp" Description="Web interface port." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/mammatus" Mode="rw" Description="Database, keys and the frame cache." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/mammatus</Config>
+  <Config Name="Public URL" Target="MAMMATUS_PUBLIC_URL" Default="" Mode="" Description="The https:// address people use (for example https://wx.example.com). Used for invite links and secure cookies." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Time zone" Target="TZ" Default="America/New_York" Mode="" Description="Default display time zone (each user can change theirs)." Type="Variable" Display="always" Required="false" Mask="false">America/New_York</Config>
+  <Config Name="Contact email" Target="MAMMATUS_CONTACT" Default="" Mode="" Description="Sent in the User-Agent to NOAA/NWS and used as the Web Push contact. Recommended." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Models" Target="MAMMATUS_MODELS" Default="hrrr,rrfs,gfs,ecmwf,aifs" Mode="" Description="Comma-separated models to offer." Type="Variable" Display="advanced" Required="false" Mask="false">hrrr,rrfs,gfs,ecmwf,aifs</Config>
+  <Config Name="Cache size (GB)" Target="MAMMATUS_CACHE_GB" Default="10" Mode="" Description="Upper bound for the on-disk frame cache." Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
+  <Config Name="Trusted proxies" Target="MAMMATUS_TRUSTED_PROXIES" Default="" Mode="" Description="Addresses/CIDRs allowed to set X-Forwarded-For/Proto. Defaults to private networks; set to your proxy's IP (e.g. 10.0.10.2/32) to tighten." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="HSTS" Target="MAMMATUS_HSTS" Default="false" Mode="" Description="Send Strict-Transport-Security (only when always served over HTTPS)." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Admin username (first run)" Target="MAMMATUS_ADMIN_USER" Default="" Mode="" Description="Optional: create this admin on first start instead of using the setup code." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Admin password (first run)" Target="MAMMATUS_ADMIN_PASSWORD" Default="" Mode="" Description="Optional: password for the first-run admin. Remove after setup." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Open-Meteo URL" Target="MAMMATUS_OPENMETEO_URL" Default="https://api.open-meteo.com" Mode="" Description="Point forecasts and soundings. Point at a self-hosted Open-Meteo or the commercial endpoint if you like." Type="Variable" Display="advanced" Required="false" Mask="false">https://api.open-meteo.com</Config>
+  <Config Name="Open-Meteo API key" Target="MAMMATUS_OPENMETEO_KEY" Default="" Mode="" Description="Optional commercial API key." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID to run as." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID to run as." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+</Container>

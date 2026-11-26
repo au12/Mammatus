@@ -1,0 +1,14 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+venv
+data
+docs
+tests
+tools/node_modules
+tools/sources
+mammatus/static-dist
+*.md
+icon.png

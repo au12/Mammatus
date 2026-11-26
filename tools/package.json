@@ -1,0 +1,19 @@
+{
+  "name": "mammatus-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build-time tools: basemap/star assets and the production front-end bundle.",
+  "scripts": {
+    "assets": "node build_assets.mjs",
+    "build": "node build_frontend.mjs"
+  },
+  "devDependencies": {
+    "earcut": "3.2.4",
+    "esbuild": "0.28.2",
+    "puppeteer-core": "^25.19.0",
+    "qrcode-generator": "2.0.4",
+    "topojson-client": "3.1.0",
+    "us-atlas": "3.0.1",
+    "world-atlas": "2.0.2"
+  }
+}

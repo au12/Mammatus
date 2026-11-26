@@ -1,0 +1,627 @@
+// GLSL sources. Every layer shares one projection so the globe, the flat map and the
+// morph between them line up exactly. Lat/lon are radians unless named *Deg.
+
+export const PROJ = /* glsl */ `
+const float PI = 3.141592653589793;
+const float TAU = 6.283185307179586;
+uniform vec4 u_view;    // lon0, lat0, k (device px per radian at the equator), t (0 globe .. 1 flat)
+uniform vec4 u_vp;      // width, height (device px), f (focal px), D (camera distance, unit sphere)
+uniform vec2 u_merc;    // mercator y of the view center, globe scale factor
+
+float wrapPi(float a) { return a - TAU * floor((a + PI) / TAU); }
+
+vec3 globeCam(vec2 ll) {
+  float dl = ll.x - u_view.x;
+  float cl = cos(ll.y);
+  vec3 p = vec3(cl * sin(dl), sin(ll.y), cl * cos(dl));
+  float s0 = sin(u_view.y), c0 = cos(u_view.y);
+  return vec3(p.x, p.y * c0 - p.z * s0, p.y * s0 + p.z * c0);
+}
+
+// Returns pixel offset from the screen center (y up) in xy and visibility (>0 visible) in z.
+vec3 projectPx(vec2 ll) {
+  vec3 g = globeCam(ll);
+  float s = u_vp.z / (u_vp.w - g.z);
+  vec2 gpx = g.xy * s;
+  float vis = g.z - 1.0 / u_vp.w;
+#ifdef MESH
+  float dl = ll.x - u_view.x;   // the morph mesh is centred on the view, never wraps
+#else
+  float dl = wrapPi(ll.x - u_view.x);
+#endif
+  float lat = clamp(ll.y, -1.4844222, 1.4844222);
+  float my = log(tan(PI * 0.25 + lat * 0.5));
+  vec2 fpx = vec2(dl, my - u_merc.x) * u_view.z;
+  return vec3(mix(gpx, fpx, u_view.w), mix(vis, 1.0, u_view.w));
+}
+`;
+
+// Screen pixel (from center, y up) -> lon/lat for the pure globe and pure flat modes.
+export const INVERSE = /* glsl */ `
+bool invGlobe(vec2 px, out vec2 ll, out vec3 nrmCam, out float edge) {
+  vec3 o = vec3(0.0, 0.0, u_vp.w);
+  vec3 d = normalize(vec3(px, -u_vp.z));
+  float b = dot(o, d);
+  float c = u_vp.w * u_vp.w - 1.0;
+  float disc = b * b - c;
+  edge = disc;
+  if (disc < 0.0) return false;
+  float t = -b - sqrt(disc);
+  vec3 h = o + t * d;
+  nrmCam = h;
+  float s0 = sin(u_view.y), c0 = cos(u_view.y);
+  float y = h.y * c0 + h.z * s0;
+  float z = -h.y * s0 + h.z * c0;
+  ll = vec2(u_view.x + atan(h.x, z), asin(clamp(y, -1.0, 1.0)));
+  return true;
+}
+vec2 invFlat(vec2 px) {
+  float lon = u_view.x + px.x / u_view.z;
+  float my = u_merc.x + px.y / u_view.z;
+  return vec2(lon, 2.0 * atan(exp(my)) - PI * 0.5);
+}
+`;
+
+export const GRID = /* glsl */ `
+uniform int u_gtype;     // 0 lat/lon, 1 lambert conformal
+uniform vec4 u_g0;       // latlon: la1, lo1, dlat, dlon (deg) | lambert: n, R*F, rho0, lov(deg)
+uniform vec4 u_g1;       // latlon: ni, nj, wrap, 0           | lambert: x1, y1, dx, dy (m)
+uniform vec2 u_gsize;    // ni, nj
+uniform float u_gjpos;   // lambert: +1 if j increases northward
+
+vec2 gridIJ(vec2 ll) {
+  if (u_gtype == 0) {
+    float lonD = degrees(ll.x), latD = degrees(ll.y);
+    float di = lonD - u_g0.y;
+    float i = u_g0.w > 0.0 ? mod(di + 720.0, 360.0) / u_g0.w : -mod(720.0 - di, 360.0) / u_g0.w;
+    return vec2(i, (latD - u_g0.x) / u_g0.z);
+  }
+  float dl = wrapPi(ll.x - radians(u_g0.w));
+  float rho = u_g0.y / pow(tan(PI * 0.25 + ll.y * 0.5), u_g0.x);
+  float th = u_g0.x * dl;
+  float x = rho * sin(th);
+  float y = u_g0.z - rho * cos(th);
+  return vec2((x - u_g1.x) / u_g1.z, (y - u_g1.y) / u_g1.w * u_gjpos);
+}
+
+bool inGrid(vec2 ij) {
+  if (ij.y < -0.5 || ij.y > u_gsize.y - 0.5) return false;
+  if (u_g1.z > 0.5 && u_gtype == 0) return true;
+  return ij.x > -0.5 && ij.x < u_gsize.x - 0.5;
+}
+
+ivec2 gidx(ivec2 p) {
+  int ni = int(u_gsize.x), nj = int(u_gsize.y);
+  if (u_gtype == 0 && u_g1.z > 0.5) p.x = (p.x % ni + ni) % ni;
+  else p.x = clamp(p.x, 0, ni - 1);
+  p.y = clamp(p.y, 0, nj - 1);
+  return p;
+}
+`;
+
+// Fragment chunk that turns a grid location into a value or color.
+export const FIELD = /* glsl */ `
+uniform highp usampler2D u_data0;
+uniform highp usampler2D u_data1;
+uniform float u_mix;          // crossfade between frame 0 and frame 1
+uniform vec2 u_qs;            // scale, offset
+uniform int u_kind;           // 0 scalar, 1 vector (speed), 2 category
+uniform float u_hemi;         // 1: flip sign in the southern hemisphere (cyclonic vorticity)
+uniform sampler2D u_lut;      // colormap (rows = categories for kind 2)
+uniform float u_stops[32];
+uniform int u_nstops;
+uniform float u_lutRows;
+uniform float u_opacity;
+
+vec3 bilin(highp usampler2D tex, vec2 ij, bool vec) {
+  vec2 f = floor(ij);
+  vec2 t = ij - f;
+  ivec2 p = ivec2(f);
+  uvec4 a = texelFetch(tex, gidx(p), 0);
+  uvec4 b = texelFetch(tex, gidx(p + ivec2(1, 0)), 0);
+  uvec4 c = texelFetch(tex, gidx(p + ivec2(0, 1)), 0);
+  uvec4 d = texelFetch(tex, gidx(p + ivec2(1, 1)), 0);
+  vec4 w = vec4((1.0 - t.x) * (1.0 - t.y), t.x * (1.0 - t.y), (1.0 - t.x) * t.y, t.x * t.y);
+  vec4 ok = vec4(a.r > 0u, b.r > 0u, c.r > 0u, d.r > 0u);
+  w *= ok;
+  float ws = w.x + w.y + w.z + w.w;
+  if (ws < 1e-4) return vec3(0.0);
+  float x = dot(w, vec4(float(a.r), float(b.r), float(c.r), float(d.r))) / ws;
+  float y = vec ? dot(w, vec4(float(a.g), float(b.g), float(c.g), float(d.g))) / ws : 0.0;
+  return vec3((x - 1.0) * u_qs.x + u_qs.y, vec ? (y - 1.0) * u_qs.x + u_qs.y : 0.0, 1.0);
+}
+
+float stopT(float v) {
+  if (v <= u_stops[0]) return 0.0;
+  for (int i = 0; i < 31; i++) {
+    if (i + 1 >= u_nstops) break;
+    float a = u_stops[i], b = u_stops[i + 1];
+    if (v < b) return (float(i) + (v - a) / max(b - a, 1e-6)) / float(u_nstops - 1);
+  }
+  return 1.0;
+}
+
+vec4 lutColor(float v, float row) {
+  float t = stopT(v);
+  return texture(u_lut, vec2(t, (row + 0.5) / u_lutRows));
+}
+
+float rateT(float rate) { return clamp(log(max(rate, 0.05) / 0.05) / log(1200.0), 0.0, 1.0); }
+
+// Category from the neighbours' weighted vote; rate only from cells of that category,
+// so edges taper to zero instead of blending unrelated codes.
+vec4 ptypeColor(highp usampler2D tex, vec2 ij) {
+  vec2 f = floor(ij);
+  vec2 t = ij - f;
+  ivec2 p = ivec2(f);
+  uint q[4];
+  q[0] = texelFetch(tex, gidx(p), 0).r;
+  q[1] = texelFetch(tex, gidx(p + ivec2(1, 0)), 0).r;
+  q[2] = texelFetch(tex, gidx(p + ivec2(0, 1)), 0).r;
+  q[3] = texelFetch(tex, gidx(p + ivec2(1, 1)), 0).r;
+  float w[4];
+  w[0] = (1.0 - t.x) * (1.0 - t.y); w[1] = t.x * (1.0 - t.y); w[2] = (1.0 - t.x) * t.y; w[3] = t.x * t.y;
+  float wc[6];
+  for (int c = 0; c < 6; c++) wc[c] = 0.0;
+  float cats[4];
+  float rates[4];
+  float wsum = 0.0;
+  for (int k = 0; k < 4; k++) {
+    if (q[k] == 0u) { cats[k] = -1.0; rates[k] = 0.0; continue; }
+    float v = float(q[k] - 1u);
+    cats[k] = floor(v / 4096.0);
+    rates[k] = mod(v, 4096.0) * 0.05;
+    int ci = int(cats[k]);
+    if (ci >= 0 && ci < 6) wc[ci] += w[k];
+    wsum += w[k];
+  }
+  if (wsum < 1e-4) return vec4(0.0);
+  int best = 0; float bw = 0.0;
+  for (int c = 1; c < 6; c++) if (wc[c] > bw) { bw = wc[c]; best = c; }
+  if (best == 0) return vec4(0.0);
+  float rate = 0.0;
+  for (int k = 0; k < 4; k++) if (int(cats[k]) == best) rate += rates[k] * w[k];
+  rate /= wsum;
+  float presence = smoothstep(0.28, 0.72, bw / wsum);
+  vec4 c = texture(u_lut, vec2(rateT(rate), (float(best) - 0.5) / u_lutRows));
+  c.a *= presence;
+  return c;
+}
+
+vec4 fieldColor(vec2 ll) {
+  vec2 ij = gridIJ(ll);
+  if (!inGrid(ij)) return vec4(0.0);
+  if (u_kind == 2) {
+    vec4 c0 = ptypeColor(u_data0, ij);
+    vec4 c1 = u_mix > 0.0 ? ptypeColor(u_data1, ij) : vec4(0.0);
+    return mix(c0, c1, u_mix);
+  }
+  bool vec = u_kind == 1;
+  vec3 s0 = bilin(u_data0, ij, vec);
+  if (s0.z < 0.5) return vec4(0.0);
+  float v0 = vec ? length(s0.xy) : s0.x;
+  float v = v0;
+  if (u_mix > 0.0) {
+    vec3 s1 = bilin(u_data1, ij, vec);
+    if (s1.z > 0.5) v = mix(v0, vec ? length(s1.xy) : s1.x, u_mix);
+  }
+  if (u_hemi > 0.5 && ll.y < 0.0) v = -v;
+  return lutColor(v, 0.0);
+}
+`;
+
+export const SURFACE_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec2 a_pos;      // full-screen: NDC corners; mesh: lon/lat degrees
+uniform float u_meshLon;
+out vec2 v_px;
+out vec2 v_ll;
+out float v_vis;
+void main() {
+#ifdef MESH
+  vec2 ll = radians(a_pos + vec2(u_meshLon, 0.0));
+  vec3 p = projectPx(ll);
+  v_ll = ll;
+  v_vis = p.z;
+  v_px = p.xy;
+  gl_Position = vec4(p.xy / (0.5 * u_vp.xy), 0.0, 1.0);
+#else
+  v_px = a_pos * 0.5 * u_vp.xy;
+  v_ll = vec2(0.0);
+  v_vis = 1.0;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+#endif
+}`;
+
+export const SURFACE_FS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+${PROJ}
+${INVERSE}
+#ifdef FIELD_ON
+${GRID}
+${FIELD}
+#endif
+in vec2 v_px;
+in vec2 v_ll;
+in float v_vis;
+out vec4 o_color;
+uniform sampler2D u_day;
+uniform sampler2D u_night;
+uniform sampler2D u_terrain;
+uniform sampler2D u_clouds;
+uniform vec3 u_sun;        // sun direction, earth-fixed (x: lon 0, y: lon 90E, z: north)
+uniform vec4 u_look;       // dim, stylized mix, clouds strength, realism (atmosphere/specular)
+uniform vec3 u_land;       // stylized land color
+uniform vec3 u_water;      // stylized water color
+
+vec3 toLinear(vec3 c) { return c * c; }
+
+void main() {
+  vec2 ll;
+  vec3 nrmCam = vec3(0.0, 0.0, 1.0);
+  float edge = 1.0;
+  float alpha = 1.0;
+#ifdef MESH
+  if (v_vis < 0.0) discard;
+  ll = v_ll;
+  nrmCam = globeCam(ll);
+#elif defined(FLAT)
+  ll = invFlat(v_px);
+  if (abs(ll.y) > 1.4844) discard;
+#else
+  if (!invGlobe(v_px, ll, nrmCam, edge)) {
+    // atmosphere halo beyond the limb
+    vec3 d = normalize(vec3(v_px, -u_vp.z));
+    vec3 o = vec3(0.0, 0.0, u_vp.w);
+    float bmin = length(cross(o, d));
+    float h = bmin - 1.0;
+    float glow = exp(-h * 38.0) * smoothstep(0.0, 0.004, h + 0.004);
+    vec3 dirCam = normalize(o + d * (-dot(o, d)));
+    float s0 = sin(u_view.y), c0 = cos(u_view.y);
+    vec3 dirE = vec3(dirCam.x, dirCam.y * c0 + dirCam.z * s0, -dirCam.y * s0 + dirCam.z * c0);
+    float lonc = u_view.x + atan(dirE.x, dirE.z);
+    float latc = asin(clamp(dirE.y, -1.0, 1.0));
+    vec3 n = vec3(cos(latc) * cos(lonc), cos(latc) * sin(lonc), sin(latc));
+    float sunUp = smoothstep(-0.35, 0.35, dot(n, u_sun));
+    vec3 col = mix(vec3(0.10, 0.16, 0.35), vec3(0.38, 0.62, 1.0), sunUp);
+    float a = glow * (0.25 + 0.75 * sunUp) * u_look.w;
+    if (a < 0.003) discard;
+    o_color = vec4(col * a, a);
+    return;
+  }
+  alpha = smoothstep(0.0, 0.0009 * u_vp.w, edge);
+#endif
+  float lon = ll.x, lat = ll.y;
+  vec3 nE = vec3(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat));
+  vec2 uv = vec2(fract(lon / TAU + 0.5), 0.5 - lat / PI);
+  vec3 day = toLinear(texture(u_day, uv).rgb);
+  float lights = texture(u_night, uv).r;
+  vec3 ter = texture(u_terrain, uv).rgb;
+  float water = ter.r;
+
+  float mu = dot(nE, u_sun);
+  float dayAmt = smoothstep(-0.1, 0.12, mu);
+  vec3 lit = day * (0.12 + 1.05 * pow(max(mu, 0.0), 0.55));
+  vec3 night = vec3(1.0, 0.72, 0.38) * lights * lights * 1.3 + day * 0.0035;
+  vec3 col = mix(night, lit, dayAmt);
+  col += vec3(1.0, 0.42, 0.16) * exp(-abs(mu) * 30.0) * 0.018 * (1.0 - water * 0.5);
+#ifndef FLAT
+  // ocean glint and limb haze on the globe
+  vec3 viewCam = normalize(vec3(0.0, 0.0, u_vp.w) - nrmCam);
+  float s0 = sin(u_view.y), c0 = cos(u_view.y);
+  vec3 vE0 = vec3(viewCam.x, viewCam.y * c0 + viewCam.z * s0, -viewCam.y * s0 + viewCam.z * c0);
+  float lv = u_view.x;
+  vec3 vE = vec3(vE0.z * cos(lv) - vE0.x * sin(lv), vE0.z * sin(lv) + vE0.x * cos(lv), vE0.y);
+  vec3 hv = normalize(vE + u_sun);
+  float spec = pow(max(dot(nE, hv), 0.0), 90.0) * water * dayAmt;
+  col += vec3(1.0, 0.92, 0.8) * spec * 0.55 * u_look.w;
+  float fres = pow(1.0 - max(dot(normalize(nrmCam), viewCam), 0.0), 3.0);
+  col = mix(col, vec3(0.32, 0.55, 1.0) * (0.15 + 0.85 * dayAmt), fres * 0.55 * u_look.w);
+#endif
+  // stylized basemap for regional zooms (and as data backdrop)
+  float elev = ter.g;
+  vec3 land = u_land * (0.85 + elev * 0.9);
+  vec3 sty = mix(land, u_water, smoothstep(0.35, 0.65, water));
+  col = mix(col, sty * mix(0.75, 1.0, dayAmt), u_look.y);
+
+#ifdef CLOUDS
+  vec4 cl = texture(u_clouds, uv);
+  float cov = smoothstep(0.30, 0.86, cl.r) * cl.a * min(u_look.z, 1.0);
+  float nightLift = clamp(u_look.z - 1.0, 0.0, 1.0);
+  vec3 cloudNight = mix(vec3(0.055, 0.07, 0.11), vec3(0.30, 0.34, 0.42) * (0.6 + 0.4 * cl.r), nightLift);
+  vec3 cloudCol = mix(cloudNight, vec3(0.95), dayAmt * 0.92 + 0.04);
+  col = mix(col, cloudCol, cov * 0.88);
+#endif
+  col *= u_look.x;
+
+#ifdef FIELD_ON
+  vec4 fc = fieldColor(ll);
+  fc.a *= u_opacity;
+  // on the 3D globe, let the night side gently darken the data too (flat maps stay fully readable)
+  vec3 fl = toLinear(fc.rgb) * mix(1.0, 0.42 + 0.58 * dayAmt, 0.85 * u_look.w);
+  col = mix(col, fl, fc.a);
+#endif
+  o_color = vec4(sqrt(max(col, 0.0)) * alpha, alpha);
+}`;
+
+export const SKY_VS = /* glsl */ `#version 300 es
+in vec2 a_pos;
+out vec2 v_px;
+uniform vec4 u_vp;
+void main() { v_px = a_pos * 0.5 * u_vp.xy; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+
+export const SKY_FS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec2 v_px;
+out vec4 o_color;
+uniform float u_gmst;
+uniform float u_fade;
+
+float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float noise(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash(i), hash(i + vec3(1, 0, 0)), f.x), mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
+             mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x), mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+float fbm(vec3 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
+
+void main() {
+  vec3 d = normalize(vec3(v_px, -u_vp.z));
+  // camera frame -> earth-fixed (x: lon0 meridian, y: north) -> celestial
+  float s0 = sin(u_view.y), c0 = cos(u_view.y);
+  vec3 e = vec3(d.x, d.y * c0 + d.z * s0, -d.y * s0 + d.z * c0);
+  float lon = u_view.x + atan(e.x, e.z);
+  float lat = asin(clamp(e.y, -1.0, 1.0));
+  float ra = lon + u_gmst;
+  vec3 eq = vec3(cos(lat) * cos(ra), cos(lat) * sin(ra), sin(lat));
+  // equatorial -> galactic (J2000)
+  mat3 G = mat3(-0.0548756, 0.4941094, -0.8676661,
+                -0.8734371, -0.4448296, -0.1980764,
+                -0.4838350, 0.7469823, 0.4559838);
+  vec3 g = G * eq;
+  float b = asin(clamp(g.z, -1.0, 1.0));
+  float l = atan(g.y, g.x);
+  float band = exp(-b * b * 38.0);
+  float bulge = exp(-(l * l * 2.2 + b * b * 30.0));
+  float dust = fbm(g * 9.0 + vec3(3.1));
+  float glowN = fbm(g * 4.0);
+  float mw = (band * (0.55 + 0.75 * glowN) + bulge * 1.4) * smoothstep(0.25, 0.75, dust + 0.15);
+  vec3 col = vec3(0.006, 0.008, 0.016) + vec3(0.55, 0.56, 0.66) * mw * 0.06 + vec3(0.30, 0.20, 0.12) * bulge * 0.03;
+  o_color = vec4(col * u_fade, 1.0);
+}`;
+
+export const STAR_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec3 a_dir;
+in vec2 a_mt;  // magnitude, temperature
+uniform float u_gmst;
+uniform float u_dpr;
+uniform float u_fade;
+out vec3 v_col;
+out float v_a;
+vec3 starColor(float t) {
+  t = clamp(t, 2500.0, 25000.0) / 100.0;
+  vec3 c;
+  c.r = t <= 66.0 ? 1.0 : clamp(1.293 * pow(t - 60.0, -0.1332), 0.0, 1.0);
+  c.g = t <= 66.0 ? clamp(0.390 * log(t) - 0.6318, 0.0, 1.0) : clamp(1.1298 * pow(t - 60.0, -0.0755), 0.0, 1.0);
+  c.b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : clamp(0.5432 * log(t - 10.0) - 1.1962, 0.0, 1.0));
+  return mix(vec3(1.0), c, 0.55);
+}
+void main() {
+  float ra = atan(a_dir.y, a_dir.x);
+  float dec = asin(clamp(a_dir.z, -1.0, 1.0));
+  vec3 d = globeCam(vec2(ra - u_gmst, dec));
+  if (d.z > -0.02) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  vec2 px = d.xy * u_vp.z / -d.z;
+  gl_Position = vec4(px / (0.5 * u_vp.xy), 0.0, 1.0);
+  float m = a_mt.x;
+  gl_PointSize = clamp(4.2 - 0.5 * m, 1.5, 5.0) * u_dpr;
+  v_a = clamp(pow(10.0, -0.4 * (m - 3.2)) * 0.75 + 0.2, 0.18, 1.0) * u_fade;
+  v_col = starColor(a_mt.y);
+}`;
+
+export const STAR_FS = /* glsl */ `#version 300 es
+precision highp float;
+in vec3 v_col;
+in float v_a;
+out vec4 o_color;
+void main() {
+  vec2 c = gl_PointCoord * 2.0 - 1.0;
+  float r = dot(c, c);
+  float a = exp(-r * 3.2) * v_a;
+  if (a < 0.004) discard;
+  o_color = vec4(v_col * a, a);
+}`;
+
+export const LINE_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec3 a_a;       // lon, lat (deg), cumulative distance (km); lon 999 = polyline break
+in vec3 a_b;
+in vec2 a_corner;  // x: 0/1 along the segment, y: -1/1 across
+uniform float u_width;
+out float v_side;
+out float v_dist;
+out float v_hw;
+void main() {
+  if (a_a.x > 500.0 || a_b.x > 500.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }  // polyline break
+  vec3 pa = projectPx(radians(a_a.xy));
+  vec3 pb = projectPx(radians(a_b.xy));
+  vec2 d = pb.xy - pa.xy;
+  float len = length(d);
+  if (pa.z < 0.0 || pb.z < 0.0 || len > 0.6 * max(u_vp.x, u_vp.y) || len < 1e-4) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return;
+  }
+  vec2 dir = d / len;
+  vec2 nrm = vec2(-dir.y, dir.x);
+  float hw = u_width * 0.5 + 1.0;
+  vec2 p = mix(pa.xy, pb.xy, a_corner.x) + nrm * a_corner.y * hw;
+  v_side = a_corner.y * hw;
+  v_hw = u_width * 0.5;
+  v_dist = mix(a_a.z, a_b.z, a_corner.x);
+  gl_Position = vec4(p / (0.5 * u_vp.xy), 0.0, 1.0);
+}`;
+
+export const LINE_FS = /* glsl */ `#version 300 es
+precision highp float;
+in float v_side;
+in float v_dist;
+in float v_hw;
+out vec4 o_color;
+uniform vec4 u_color;
+uniform vec2 u_dash;   // km on, km period (0 = solid)
+void main() {
+  float a = clamp(v_hw + 0.5 - abs(v_side), 0.0, 1.0);
+  if (u_dash.y > 0.0 && mod(v_dist, u_dash.y) > u_dash.x) discard;
+  a *= u_color.a;
+  if (a < 0.01) discard;
+  o_color = vec4(u_color.rgb * a, a);
+}`;
+
+export const FILL_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec2 a_ll;
+in float a_owner;
+uniform sampler2D u_colors;
+uniform float u_ncolors;
+out vec4 v_col;
+out float v_vis;
+void main() {
+  vec3 p = projectPx(radians(a_ll));
+  float idx = a_owner;
+  vec2 uv = vec2((mod(idx, 1024.0) + 0.5) / 1024.0, (floor(idx / 1024.0) + 0.5) / u_ncolors);
+  v_col = texture(u_colors, uv);
+  v_vis = p.z;
+  // keep far-side vertices in place (moving them would smear triangles across the screen); the FS discards them
+  gl_Position = vec4(p.xy / (0.5 * u_vp.xy), 0.0, 1.0);
+}`;
+
+export const FILL_FS = /* glsl */ `#version 300 es
+precision highp float;
+in vec4 v_col;
+in float v_vis;
+out vec4 o_color;
+void main() {
+  if (v_vis < 0.0 || v_col.a < 0.01) discard;
+  o_color = vec4(v_col.rgb * v_col.a, v_col.a);
+}`;
+
+export const PARTICLE_UPDATE_VS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+${PROJ}
+${INVERSE}
+${GRID}
+uniform highp usampler2D u_wind;
+uniform vec2 u_qs;
+uniform float u_step;     // radians of travel per (m/s) this frame
+uniform float u_maxAge;
+uniform float u_dt;
+uniform float u_seed;
+in vec4 a_state;           // lon, lat (rad), age, rnd
+out vec4 v_state;
+
+float rnd(float n) { return fract(sin(n * 12.9898 + u_seed * 78.233) * 43758.5453); }
+
+vec3 windAt(vec2 ll) {
+  vec2 ij = gridIJ(ll);
+  if (!inGrid(ij)) return vec3(0.0);
+  vec2 f = floor(ij); vec2 t = ij - f; ivec2 p = ivec2(f);
+  uvec4 a = texelFetch(u_wind, gidx(p), 0), b = texelFetch(u_wind, gidx(p + ivec2(1, 0)), 0);
+  uvec4 c = texelFetch(u_wind, gidx(p + ivec2(0, 1)), 0), d = texelFetch(u_wind, gidx(p + ivec2(1, 1)), 0);
+  if (a.r == 0u || b.r == 0u || c.r == 0u || d.r == 0u) return vec3(0.0);
+  vec2 q = mix(mix(vec2(a.rg), vec2(b.rg), t.x), mix(vec2(c.rg), vec2(d.rg), t.x), t.y);
+  return vec3((q - 1.0) * u_qs.x + u_qs.y, 1.0);
+}
+
+vec4 spawn(float id) {
+  for (int k = 0; k < 4; k++) {
+    vec2 px = (vec2(rnd(id + float(k) * 7.1), rnd(id * 1.37 + float(k) * 3.3)) - 0.5) * u_vp.xy;
+    vec2 ll; vec3 nc; float e;
+    bool ok = true;
+    if (u_view.w > 0.999) ll = invFlat(px);
+    else ok = invGlobe(px, ll, nc, e);
+    if (ok && inGrid(gridIJ(ll))) return vec4(ll, 0.0, rnd(id * 3.7));
+  }
+  return vec4(0.0, 0.0, u_maxAge * 2.0, rnd(id));
+}
+
+void main() {
+  vec4 s = a_state;
+  float id = float(gl_VertexID) + s.w * 977.0;
+  vec3 w = windAt(s.xy);
+  vec3 scr = projectPx(s.xy);
+  bool off = abs(scr.x) > 0.55 * u_vp.x || abs(scr.y) > 0.55 * u_vp.y || scr.z < 0.0;
+  if (s.z > u_maxAge * (0.55 + 0.45 * s.w) || w.z < 0.5 || off) {
+    v_state = spawn(id);
+    return;
+  }
+  float lat = s.y + w.y * u_step;
+  float lon = s.x + w.x * u_step / max(cos(s.y), 0.05);
+  v_state = vec4(wrapPi(lon), clamp(lat, -1.55, 1.55), s.z + u_dt, s.w);
+}`;
+
+export const PARTICLE_UPDATE_FS = /* glsl */ `#version 300 es
+precision highp float;
+out vec4 o;
+void main() { o = vec4(0.0); }`;
+
+export const PARTICLE_DRAW_VS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+${PROJ}
+${GRID}
+uniform highp usampler2D u_wind;
+uniform vec2 u_qs;
+uniform float u_trail;      // radians of trail per (m/s)
+uniform float u_maxAge;
+uniform float u_width;
+in vec4 a_state;
+in vec2 a_corner;
+out float v_a;
+out float v_side;
+out float v_hw;
+
+vec2 windAt(vec2 ll) {
+  vec2 ij = gridIJ(ll);
+  if (!inGrid(ij)) return vec2(0.0);
+  uvec4 q = texelFetch(u_wind, gidx(ivec2(floor(ij + 0.5))), 0);
+  if (q.r == 0u) return vec2(0.0);
+  return (vec2(q.rg) - 1.0) * u_qs.x + u_qs.y;
+}
+
+void main() {
+  vec2 ll = a_state.xy;
+  vec2 w = windAt(ll);
+  float sp = length(w);
+  vec2 tail = vec2(ll.x - w.x * u_trail / max(cos(ll.y), 0.05), ll.y - w.y * u_trail);
+  vec3 pa = projectPx(tail), pb = projectPx(ll);
+  vec2 d = pb.xy - pa.xy; float len = length(d);
+  float age = a_state.z;
+  float life = u_maxAge * (0.55 + 0.45 * a_state.w);
+  float fade = smoothstep(0.0, 0.35, age) * (1.0 - smoothstep(life * 0.75, life, age));
+  if (pa.z < 0.0 || pb.z < 0.0 || len < 0.2 || len > 200.0 || sp < 0.3) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec2 dir = d / len, nrm = vec2(-dir.y, dir.x);
+  float hw = u_width * 0.5 + 0.8;
+  vec2 p = mix(pa.xy, pb.xy, a_corner.x) + nrm * a_corner.y * hw;
+  v_side = a_corner.y * hw; v_hw = u_width * 0.5;
+  v_a = fade * clamp(0.35 + sp / 18.0, 0.35, 1.0) * mix(0.0, 1.0, a_corner.x);
+  gl_Position = vec4(p / (0.5 * u_vp.xy), 0.0, 1.0);
+}`;
+
+export const PARTICLE_DRAW_FS = /* glsl */ `#version 300 es
+precision highp float;
+in float v_a; in float v_side; in float v_hw;
+uniform vec4 u_color;
+out vec4 o_color;
+void main() {
+  float a = clamp(v_hw + 0.6 - abs(v_side), 0.0, 1.0) * v_a * u_color.a;
+  if (a < 0.01) discard;
+  o_color = vec4(u_color.rgb * a, a);
+}`;

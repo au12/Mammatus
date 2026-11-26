@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" >
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#080a1f"/><stop offset=".55" stop-color="#1a1b47"/><stop offset="1" stop-color="#46305f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx=".5" cy="1.08" r=".78">
+      <stop offset="0" stop-color="#ff9a6a" stop-opacity=".7"/><stop offset=".55" stop-color="#e2708a" stop-opacity=".18"/><stop offset="1" stop-color="#e2708a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#sky)"/>
+  <rect width="64" height="64" rx="14" fill="url(#glow)"/>
+  <g fill="#fff"><circle cx="10.5" cy="8.5" r=".5" opacity=".75"/><circle cx="53" cy="7" r=".4" opacity=".6"/><circle cx="47" cy="12.5" r=".3" opacity=".5"/><circle cx="19" cy="5" r=".3" opacity=".5"/><circle cx="57" cy="15" r=".25" opacity=".4"/></g>
+  <g transform="translate(6.40 11.80) scale(0.8)"><defs>
+    <linearGradient id="ib" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#565499"/><stop offset=".55" stop-color="#3a3a7e"/><stop offset="1" stop-color="#2e2e6a"/>
+    </linearGradient>
+    <radialGradient id="if" cx=".55" cy="1" r="1.05">
+      <stop offset="0" stop-color="#ffe6c2"/><stop offset=".26" stop-color="#ffb3a7"/><stop offset=".56" stop-color="#b08ce4"/><stop offset=".9" stop-color="#3d3b84"/><stop offset="1" stop-color="#2e2e6a"/>
+    </radialGradient>
+    <radialGradient id="ik" cx=".55" cy="1" r="1.05">
+      <stop offset="0" stop-color="#f0ada3"/><stop offset=".45" stop-color="#8a74c6"/><stop offset=".9" stop-color="#34337a"/><stop offset="1" stop-color="#2b2b64"/>
+    </radialGradient>
+    <linearGradient id="ih" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <g class="mm-base"><path d="M8.5 27.5C5 27.5 4.2 23.2 7.4 21.9C7.2 17.6 11.6 15.6 15.2 17.1C16.6 12.6 23.2 11.4 26.4 14.6C28.9 10.4 36.4 10 38.9 14.2C42 11.6 48.4 12.6 49.6 16.8C53.6 15.7 58.4 18.3 57.3 22.2C60.2 23.3 59.6 27.5 55.8 27.5Z" fill="url(#ib)"/><path d="M8.5 27.5C5 27.5 4.2 23.2 7.4 21.9C7.2 17.6 11.6 15.6 15.2 17.1C16.6 12.6 23.2 11.4 26.4 14.6C28.9 10.4 36.4 10 38.9 14.2C42 11.6 48.4 12.6 49.6 16.8C53.6 15.7 58.4 18.3 57.3 22.2C60.2 23.3 59.6 27.5 55.8 27.5Z" fill="url(#ih)"/></g>
+  <g class="mm-back"><path class="mm-lobe" style="--d:0.38s" d="M13.6 26.6 A6.1000000000000005 5.61 0 0 0 25.8 26.6 Z" fill="url(#ik)"/><path class="mm-lobe" style="--d:0.5s" d="M25.6 26.6 A6.099999999999998 5.86 0 0 0 37.8 26.6 Z" fill="url(#ik)"/><path class="mm-lobe" style="--d:0.62s" d="M37.6 26.6 A6.099999999999998 5.61 0 0 0 49.8 26.6 Z" fill="url(#ik)"/></g>
+  <g class="mm-front"><path class="mm-lobe" style="--d:0.04s" d="M6.6 27.3 A6.6000000000000005 6.47 0 0 0 19.8 27.3 Z" fill="url(#if)"/><path class="mm-lobe" style="--d:0.14s" d="M18.6 27.3 A6.800000000000001 7.34 0 0 0 32.2 27.3 Z" fill="url(#if)"/><path class="mm-lobe" style="--d:0.24s" d="M31 27.3 A6.800000000000001 7.48 0 0 0 44.6 27.3 Z" fill="url(#if)"/><path class="mm-lobe" style="--d:0.32s" d="M43.4 27.3 A6.800000000000001 6.66 0 0 0 57 27.3 Z" fill="url(#if)"/></g></g>
+</svg>

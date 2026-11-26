@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+/data/
+mammatus/static-dist/
+tools/node_modules/
+tools/sources/
+.pytest_cache/
+.DS_Store
