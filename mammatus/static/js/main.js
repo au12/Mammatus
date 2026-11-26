@@ -154,7 +154,7 @@ class App {
     this.avatar = h("button", { class: "iconbtn glass", "aria-label": "Settings", title: "Settings", onclick: () => this.openSettings() });
     this.renderAvatar();
     const layersBtn = h("button", { class: "iconbtn glass", "aria-label": "Map layers", title: "Map layers (globe, alerts, labels)", html: icon("layers", 20) });
-    const brand = h("button", { class: "brand glass", title: "Mammatus", onclick: () => this.flyHome() }, h("span", { html: logoSVG({ size: 30 }) }), h("span", { class: "word" }, h("b", {}, "Mammatus")));
+    const brand = h("button", { class: "brand glass", title: "Mammatus", onclick: () => this.flyHome() }, h("span", { html: logoSVG({ size: 28 }) }), h("span", { class: "word" }, h("b", {}, "Mammatus")));
     const searchBtn = h("button", { class: "iconbtn glass", "aria-label": "Search", title: "Search ( / )", html: icon("search", 20), onclick: () => this.search.open() });
     const placesBtn = h("button", { class: "iconbtn glass hide-m", "aria-label": "Places", title: "Your places", html: icon("star", 20), onclick: () => this.drawer.open("places") });
     ui.append(h("header", { class: "topbar" }, brand, this.pill, h("div", { class: "spacer" }), searchBtn, placesBtn, layersBtn, this.bell, this.avatar));

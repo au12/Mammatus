@@ -316,7 +316,7 @@ async function system(app, p, ctx) {
 // ------------------------------------------------------------------ about
 function about(app, p) {
   p.append(h("div", { style: { display: "grid", justifyItems: "center", gap: "10px", padding: "10px 0 6px", textAlign: "center" } },
-    h("div", { html: logoSVG({ size: 72 }) }), h("h3", { style: { margin: 0, fontWeight: 650, letterSpacing: ".02em" } }, "Mammatus"),
+    h("div", { html: logoSVG({ size: 76, loop: true, cls: "mm-brief" }) }), h("h3", { style: { margin: 0, fontWeight: 650, letterSpacing: ".02em" } }, "Mammatus"),
     h("span", { class: "note" }, `Version ${app.catalog.version}`)),
   h("h4", {}, "Data"),
   h("p", { class: "note" }, "Model data: NOAA HRRR, RRFS and GFS via the NOAA Open Data Dissemination program; ECMWF IFS and AIFS open data (CC BY 4.0). Radar: NOAA MRMS. Lightning: NOAA GOES-R Geostationary Lightning Mapper. Fronts: NWS Weather Prediction Center. Satellite: courtesy of SSEC, University of Wisconsin–Madison (RealEarth). Alerts: National Weather Service. Point forecasts and soundings: Open-Meteo (CC BY 4.0). Basemap: Natural Earth and US Census via us-atlas. Earth imagery: NASA Blue Marble and Black Marble. Stars: Yale Bright Star Catalog."),

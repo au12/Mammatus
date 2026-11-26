@@ -96,12 +96,12 @@ export class Drawer {
   }
 
   loading(text) {
-    return h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 44, cls: "loading" }) }), text);
+    return h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 48, loop: true }) }), text);
   }
 
   emptyPoint() {
     const saved = this.app.points;
-    const el = h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 44 }) }), "Tap anywhere on the map, or pick one of your places.");
+    const el = h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 48 }) }), "Tap anywhere on the map, or pick one of your places.");
     if (saved.length) {
       const list = h("div", { class: "list", style: { marginTop: "16px", textAlign: "left" } });
       for (const p of saved) list.append(h("button", { class: "item", onclick: () => this.app.selectPoint({ ...p }, { fly: true, tab: this.tab }) }, h("div", {}, h("b", {}, p.name), h("small", {}, fmtLatLon(p.lat, p.lon))), h("span", { html: icon("right", 16) })));
@@ -196,7 +196,7 @@ export class Drawer {
     const app = this.app;
     const pts = app.points;
     if (!pts.length) {
-      this.body.append(h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 44 }) }), "No saved places yet. Tap the map, then the star, to save one.",
+      this.body.append(h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 48 }) }), "No saved places yet. Tap the map, then the star, to save one.",
         h("div", { style: { marginTop: "14px" } }, h("button", { class: "btn", onclick: () => app.locate() }, h("span", { html: icon("locate", 16) }), "Use my location"))));
       return;
     }

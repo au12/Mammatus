@@ -1,0 +1,56 @@
+/* The Mammatus mark in motion (markup from js/ui/logo.js).
+   Every pouch is a <g class="mm-p"> whose transform-origin is its attachment to the cloud base and
+   which carries its own delay (--d), period (--t) and sag distance (--y).
+   .mm-anim  pouches inflate out of the deck in a wave spreading from the sun
+   .mm-loop  afterwards they keep sagging, wobbling and swaying (.mm-brief: only for a while) */
+.mm-logo { display: block; }
+.mm-anim .mm-p { animation: mm-in 1.15s cubic-bezier(.3, 1.55, .45, 1) var(--d, 0s) both; }
+.mm-anim .mm-sun { transform-origin: 23px 95px; animation: mm-rise 1.4s cubic-bezier(.2, .8, .2, 1) both; }
+.mm-anim .mm-haze { animation: mm-fade 1.6s ease-out both; }
+
+.mm-loop .mm-p, .brand:hover .mm-anim .mm-p {
+  animation: mm-in 1.15s cubic-bezier(.3, 1.55, .45, 1) var(--d, 0s) both,
+    mm-sag var(--t, 4s) ease-in-out calc(var(--d, 0s) + 1.2s) var(--mm-n, infinite) alternate;
+}
+.mm-loop .mm-b, .brand:hover .mm-anim .mm-b { animation-name: mm-in, mm-drip; animation-direction: normal; }
+.mm-loop .mm-c, .brand:hover .mm-anim .mm-c { animation-name: mm-in, mm-sway; }
+.mm-loop .mm-far, .brand:hover .mm-anim .mm-far { animation-name: mm-in, mm-drift; }
+.mm-loop .mm-field, .brand:hover .mm-anim .mm-field { transform-origin: 23px 95px; animation: mm-push 7s ease-in-out 1.2s var(--mm-n, infinite) alternate; }
+.mm-loop .mm-sun, .brand:hover .mm-anim .mm-sun {
+  transform-origin: 23px 95px;
+  animation: mm-rise 1.4s cubic-bezier(.2, .8, .2, 1) both, mm-glow 4.6s ease-in-out 1.4s var(--mm-n, infinite) alternate;
+}
+.mm-brief { --mm-n: 8; }
+
+@keyframes mm-in {
+  0% { transform: translateY(calc(var(--y, 1px) * -2)) scale(.35, 0); opacity: 0; }
+  30% { opacity: 1; }
+  100% { transform: none; opacity: 1; }
+}
+@keyframes mm-rise { 0% { transform: translateY(7px) scale(.6); opacity: 0; } 100% { transform: none; opacity: 1; } }
+@keyframes mm-fade { 0% { opacity: 0; } 100% { opacity: 1; } }
+/* a slow sag: the pouch stretches down and narrows, then pulls back up */
+@keyframes mm-sag {
+  0% { transform: translateY(calc(var(--y, 1px) * -.35)) scale(1.05, .9); }
+  100% { transform: translateY(var(--y, 1px)) scale(.93, 1.2); }
+}
+/* a drip that never lets go: droops, bounces back, jiggles */
+@keyframes mm-drip {
+  0%, 100% { transform: none; }
+  38% { transform: translateY(var(--y, 1px)) scale(.9, 1.26); }
+  52% { transform: translateY(calc(var(--y, 1px) * -.3)) scale(1.08, .88); }
+  64% { transform: translateY(calc(var(--y, 1px) * .3)) scale(.97, 1.08); }
+  76% { transform: scale(1.02, .97); }
+}
+@keyframes mm-sway {
+  0% { transform: rotate(-5deg) scale(1.03, .95); }
+  100% { transform: rotate(5deg) translateY(calc(var(--y, 1px) * .7)) scale(.96, 1.14); }
+}
+@keyframes mm-drift { 0% { transform: translateX(-1.6px); } 100% { transform: translateX(1.6px) scale(1.06, 1); } }
+/* the whole field streams toward the viewer from the vanishing point */
+@keyframes mm-push { 0% { transform: none; } 100% { transform: scale(1.09); } }
+@keyframes mm-glow { 0% { transform: none; opacity: 1; } 100% { transform: scale(1.14); opacity: .86; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mm-logo .mm-p, .mm-logo .mm-field, .mm-logo .mm-sun, .mm-logo .mm-haze { animation: none !important; }
+}

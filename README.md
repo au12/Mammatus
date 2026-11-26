@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon.png" width="128" alt="Mammatus icon">
+  <img src="docs/logo.svg" width="128" alt="Mammatus icon">
 </p>
 
 <h1 align="center">Mammatus</h1>

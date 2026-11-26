@@ -7,7 +7,7 @@ const input = (attrs) => h("input", { class: "input", ...attrs });
 
 function card(title, sub, body, foot) {
   return h("div", { class: "auth" }, h("form", { class: "card glass-strong", novalidate: true },
-    h("div", { class: "head" }, h("div", { html: logoSVG({ size: 58 }) }), h("h1", {}, title), sub ? h("p", {}, sub) : null),
+    h("div", { class: "head" }, h("div", { html: logoSVG({ size: 84, loop: true, cls: "mm-brief" }) }), h("h1", {}, title), sub ? h("p", {}, sub) : null),
     ...body, foot ? h("div", { class: "foot" }, foot) : null));
 }
 

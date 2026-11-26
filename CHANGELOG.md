@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **New icon.** The mark is now the underside of a mammatus deck at sunset: a seeded, procedurally
+  packed field of lumpy pouches lit from below, flattening into streaks toward a sun on the horizon.
+  Mostly reds, oranges and gold, with a little deep purple and a touch of deep blue.
+- **New logo animation.** Pouches inflate out of the cloud base in a wave spreading from the sun,
+  then sag, drip and sway on their own rhythms while the field drifts toward you. It loops on the
+  splash screen and while loading, runs briefly on sign-in and About, and in the top bar plays once
+  and again on hover. Reduced-motion settings turn it off.
+- Icon files carry a `?v=2` suffix so browsers pick up the new set. An installed home-screen icon
+  on iOS only changes after removing and re-adding the app.
+
 ## 1.1.0 — 2026-11-26
 
 ### Added

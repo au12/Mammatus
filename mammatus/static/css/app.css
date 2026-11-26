@@ -1,3 +1,4 @@
+@import "./logo.css";
 /* Mammatus — design system and layout */
 :root {
   --bg: #04060c;
@@ -56,17 +57,6 @@ svg { display: block; }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .glass { background: rgba(14, 18, 30, 0.94); }
 }
-
-/* ------------------------------------------------------------------ logo */
-.mm-logo .mm-lobe { transform-box: fill-box; transform-origin: 50% 0%; }
-.mm-anim .mm-lobe { animation: mm-form 1.25s var(--spring) both; animation-delay: var(--d, 0s); }
-.mm-anim .mm-base { animation: mm-base .7s var(--ease) both; }
-@keyframes mm-form { 0% { transform: scale(.55, 0); opacity: 0; } 35% { opacity: 1; } 100% { transform: none; opacity: 1; } }
-@keyframes mm-base { 0% { opacity: 0; transform: translateY(-3px); } 100% { opacity: 1; transform: none; } }
-.mm-logo.loading .mm-lobe { animation: mm-pulse 1.3s ease-in-out infinite; animation-delay: var(--d, 0s); }
-@keyframes mm-pulse { 0%, 100% { transform: none; } 50% { transform: scale(1.04, 1.14); } }
-.brand:hover .mm-logo .mm-lobe { animation: mm-sway 2.4s ease-in-out infinite alternate; animation-delay: var(--d, 0s); }
-@keyframes mm-sway { 0% { transform: none; } 100% { transform: scale(1.03, 1.1); } }
 
 /* ------------------------------------------------------------------ splash */
 #splash { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: radial-gradient(ellipse at 50% 120%, #2a1d44 0%, #0b0d22 45%, #03040a 100%); transition: opacity .9s var(--ease), visibility .9s; }
@@ -209,7 +199,7 @@ svg { display: block; }
 .tabs button.sel { color: var(--text); border-bottom-color: var(--accent); }
 .drawer .body { flex: 1; overflow: auto; padding: 14px 16px 20px; overscroll-behavior: contain; }
 .empty { color: var(--text-3); text-align: center; padding: 30px 10px; font-size: 13px; }
-.empty .mm-logo { margin: 0 auto 12px; opacity: .8; }
+.empty .mm-logo { margin: 0 auto 12px; border-radius: 22.5%; }
 .list { display: grid; gap: 6px; }
 .item { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,.035); border: 1px solid transparent; text-align: left; transition: background .15s, border-color .15s; }
 .item:hover { background: rgba(255,255,255,.06); border-color: var(--line); }
@@ -368,8 +358,7 @@ table.t td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-al
 }
 
 /* ------------------------------------------------------------------ additions */
-#splash .mm-logo .mm-lobe { animation: mm-form 1.25s var(--spring) both, mm-pulse 1.8s ease-in-out infinite; animation-delay: var(--d, 0s), calc(1.4s + var(--d, 0s)); }
-#splash .mm-logo { filter: drop-shadow(0 10px 30px rgba(245, 154, 185, .25)); }
+#splash .mm-logo { border-radius: 22.5%; box-shadow: 0 16px 48px rgba(255, 112, 56, .3), 0 2px 10px rgba(0, 0, 0, .5); }
 .layersmenu { position: fixed; }
 .layersmenu .switch { transform: scale(.85); }
 .lrow .switch { pointer-events: none; }

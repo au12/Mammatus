@@ -50,7 +50,7 @@ fs.writeFileSync(path.join(out, "index.html"), html);
 
 // 4. service worker with the precache list
 const assets = fs.readdirSync(path.join(out, "assets")).filter((f) => !f.startsWith("chunk-")).map((f) => `/assets/${f}`);
-const precache = ["/", ...assets, "/manifest.webmanifest", "/icons/icon-192.png", "/icons/badge-96.png", "/data/boundaries.bin", "/data/stars.bin", "/data/cities.json"];
+const precache = ["/", ...assets, "/manifest.webmanifest", "/icons/icon-192.png?v=2", "/icons/badge-96.png?v=2", "/data/boundaries.bin", "/data/stars.bin", "/data/cities.json"];
 let sw = fs.readFileSync(path.join(src, "sw.js"), "utf8");
 sw = sw.replace('const VERSION = "dev";', `const VERSION = ${JSON.stringify(version)};`)
   .replace(/const PRECACHE = \[[^\]]*\];/, `const PRECACHE = ${JSON.stringify(precache)};`);
