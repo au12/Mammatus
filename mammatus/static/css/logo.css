@@ -1,56 +1,81 @@
 /* The Mammatus mark in motion (markup from js/ui/logo.js).
-   Every pouch is a <g class="mm-p"> whose transform-origin is its attachment to the cloud base and
-   which carries its own delay (--d), period (--t) and sag distance (--y).
-   .mm-anim  pouches inflate out of the deck in a wave spreading from the sun
-   .mm-loop  afterwards they keep sagging, wobbling and swaying (.mm-brief: only for a while) */
-.mm-logo { display: block; }
-.mm-anim .mm-p { animation: mm-in 1.15s cubic-bezier(.3, 1.55, .45, 1) var(--d, 0s) both; }
-.mm-anim .mm-sun { transform-origin: 23px 95px; animation: mm-rise 1.4s cubic-bezier(.2, .8, .2, 1) both; }
-.mm-anim .mm-haze { animation: mm-fade 1.6s ease-out both; }
+   Each pouch is <g class="mm-p"><g class="mm-q">…</g></g>; both share a transform-origin at the
+   pouch's attachment to the cloud base. Per pouch: --d/--f when and how long it forms, --t/--u the
+   periods of its two cycles, --s stretch, --y sag, --k lean, --x sideways pull. Lumps (.mm-k) bud later.
+   .mm-anim   pouches condense out of the deck, patch by patch
+   .mm-loop   afterwards they keep stretching, leaning and shrinking, slowly (.mm-brief: for a while)
+   --mm-skip  head start for the forming; --mm-tempo scales the cycle periods */
+.mm-logo { display: block; --mm-settle: cubic-bezier(.2, .62, .25, 1); }
+.mm-q { transform-origin: inherit; }
+
+.mm-anim .mm-p, .mm-anim .mm-k { animation: mm-in var(--f, 3s) var(--mm-settle) calc(var(--d, 0s) - var(--mm-skip, 0s)) both; }
+.mm-anim .mm-k { animation-name: mm-bud; }
+.mm-anim .mm-sun { transform-origin: 23px 95px; animation: mm-rise 2.6s var(--mm-settle) calc(0s - var(--mm-skip, 0s)) both; }
+.mm-anim .mm-haze { animation: mm-fade 3s ease-out calc(0s - var(--mm-skip, 0s)) both; }
 
 .mm-loop .mm-p, .brand:hover .mm-anim .mm-p {
-  animation: mm-in 1.15s cubic-bezier(.3, 1.55, .45, 1) var(--d, 0s) both,
-    mm-sag var(--t, 4s) ease-in-out calc(var(--d, 0s) + 1.2s) var(--mm-n, infinite) alternate;
+  animation: mm-in var(--f, 3s) var(--mm-settle) calc(var(--d, 0s) - var(--mm-skip, 0s)) both,
+    mm-lean calc(var(--u, 12s) * var(--mm-tempo, 1)) linear calc(var(--d, 0s) + var(--f, 3s) - var(--mm-skip, 0s)) var(--mm-n, infinite);
 }
-.mm-loop .mm-b, .brand:hover .mm-anim .mm-b { animation-name: mm-in, mm-drip; animation-direction: normal; }
-.mm-loop .mm-c, .brand:hover .mm-anim .mm-c { animation-name: mm-in, mm-sway; }
-.mm-loop .mm-far, .brand:hover .mm-anim .mm-far { animation-name: mm-in, mm-drift; }
-.mm-loop .mm-field, .brand:hover .mm-anim .mm-field { transform-origin: 23px 95px; animation: mm-push 7s ease-in-out 1.2s var(--mm-n, infinite) alternate; }
-.mm-loop .mm-sun, .brand:hover .mm-anim .mm-sun {
+.mm-loop .mm-q, .brand:hover .mm-anim .mm-q {
+  animation: mm-stretch calc(var(--t, 9s) * var(--mm-tempo, 1)) linear calc(var(--d, 0s) + var(--f, 3s) - var(--mm-skip, 0s)) var(--mm-n, infinite);
+}
+.mm-loop .mm-k, .brand:hover .mm-anim .mm-k {
+  animation: mm-bud var(--f, 3s) var(--mm-settle) calc(var(--d, 0s) - var(--mm-skip, 0s)) both,
+    mm-swell calc(var(--t, 7s) * var(--mm-tempo, 1)) linear calc(var(--d, 0s) + var(--f, 3s) - var(--mm-skip, 0s)) var(--mm-n, infinite);
+}
+.mm-loop .mm-field, .brand:hover .mm-anim .mm-field {
   transform-origin: 23px 95px;
-  animation: mm-rise 1.4s cubic-bezier(.2, .8, .2, 1) both, mm-glow 4.6s ease-in-out 1.4s var(--mm-n, infinite) alternate;
+  animation: mm-push calc(16s * var(--mm-tempo, 1)) cubic-bezier(.37, 0, .63, 1) calc(1s - var(--mm-skip, 0s)) var(--mm-n, infinite) alternate;
 }
-.mm-brief { --mm-n: 8; }
+.mm-loop .mm-sun, .brand:hover .mm-anim .mm-sun {
+  animation: mm-rise 2.6s var(--mm-settle) calc(0s - var(--mm-skip, 0s)) both,
+    mm-glow 8s cubic-bezier(.37, 0, .63, 1) calc(2.6s - var(--mm-skip, 0s)) var(--mm-n, infinite) alternate;
+}
+.mm-brief { --mm-n: 4; }
+.mm-formed { --mm-skip: 40s; }
+.mm-fast { --mm-tempo: .5; }
 
+/* forming: a wide, faint smear on the cloud base slowly fills and sags into a pouch, no bounce */
 @keyframes mm-in {
-  0% { transform: translateY(calc(var(--y, 1px) * -2)) scale(.35, 0); opacity: 0; }
-  30% { opacity: 1; }
-  100% { transform: none; opacity: 1; }
+  0% { transform: scale(1.32, .04); opacity: 0; }
+  45% { opacity: 1; }
+  100% { transform: scale(1, 1); opacity: 1; }
+}
+@keyframes mm-bud {
+  0% { transform: scale(.25); opacity: 0; }
+  50% { opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
 }
 @keyframes mm-rise { 0% { transform: translateY(7px) scale(.6); opacity: 0; } 100% { transform: none; opacity: 1; } }
 @keyframes mm-fade { 0% { opacity: 0; } 100% { opacity: 1; } }
-/* a slow sag: the pouch stretches down and narrows, then pulls back up */
-@keyframes mm-sag {
-  0% { transform: translateY(calc(var(--y, 1px) * -.35)) scale(1.05, .9); }
-  100% { transform: translateY(var(--y, 1px)) scale(.93, 1.2); }
+
+/* The cycles are sine waves cut into three segments (ease out of the rest pose, ease through the
+   swing, ease back in), so a pouch never stops dead or snaps: it is always slowly going somewhere. */
+/* stretch: sags and narrows like a drop of syrup, then is drawn back up, shortening and widening */
+@keyframes mm-stretch {
+  0% { transform: translateY(0) scale(1, 1); animation-timing-function: cubic-bezier(.61, 1, .88, 1); }
+  30% { transform: translateY(var(--y, 1px)) scale(calc(1 - var(--s, .14) * .42), calc(1 + var(--s, .14))); animation-timing-function: cubic-bezier(.37, 0, .63, 1); }
+  74% { transform: translateY(calc(var(--y, 1px) * -.45)) scale(calc(1 + var(--s, .14) * .3), calc(1 - var(--s, .14) * .62)); animation-timing-function: cubic-bezier(.12, 0, .39, 0); }
+  100% { transform: translateY(0) scale(1, 1); }
 }
-/* a drip that never lets go: droops, bounces back, jiggles */
-@keyframes mm-drip {
-  0%, 100% { transform: none; }
-  38% { transform: translateY(var(--y, 1px)) scale(.9, 1.26); }
-  52% { transform: translateY(calc(var(--y, 1px) * -.3)) scale(1.08, .88); }
-  64% { transform: translateY(calc(var(--y, 1px) * .3)) scale(.97, 1.08); }
-  76% { transform: scale(1.02, .97); }
+/* lean: the hanging end is pulled to one side and then the other */
+@keyframes mm-lean {
+  0% { transform: translateX(0) skewX(0deg); animation-timing-function: cubic-bezier(.61, 1, .88, 1); }
+  25% { transform: translateX(var(--x, 0px)) skewX(var(--k, 0deg)); animation-timing-function: cubic-bezier(.37, 0, .63, 1); }
+  75% { transform: translateX(calc(var(--x, 0px) * -1)) skewX(calc(var(--k, 0deg) * -1)); animation-timing-function: cubic-bezier(.12, 0, .39, 0); }
+  100% { transform: translateX(0) skewX(0deg); }
 }
-@keyframes mm-sway {
-  0% { transform: rotate(-5deg) scale(1.03, .95); }
-  100% { transform: rotate(5deg) translateY(calc(var(--y, 1px) * .7)) scale(.96, 1.14); }
+@keyframes mm-swell {
+  0% { transform: scale(1); animation-timing-function: cubic-bezier(.61, 1, .88, 1); }
+  25% { transform: scale(calc(1 + var(--s, .1))); animation-timing-function: cubic-bezier(.37, 0, .63, 1); }
+  75% { transform: scale(calc(1 - var(--s, .1) * .8)); animation-timing-function: cubic-bezier(.12, 0, .39, 0); }
+  100% { transform: scale(1); }
 }
-@keyframes mm-drift { 0% { transform: translateX(-1.6px); } 100% { transform: translateX(1.6px) scale(1.06, 1); } }
 /* the whole field streams toward the viewer from the vanishing point */
-@keyframes mm-push { 0% { transform: none; } 100% { transform: scale(1.09); } }
-@keyframes mm-glow { 0% { transform: none; opacity: 1; } 100% { transform: scale(1.14); opacity: .86; } }
+@keyframes mm-push { 0% { transform: scale(1); } 100% { transform: scale(1.08); } }
+@keyframes mm-glow { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.12); opacity: .88; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .mm-logo .mm-p, .mm-logo .mm-field, .mm-logo .mm-sun, .mm-logo .mm-haze { animation: none !important; }
+  .mm-logo .mm-p, .mm-logo .mm-q, .mm-logo .mm-k, .mm-logo .mm-field, .mm-logo .mm-sun, .mm-logo .mm-haze { animation: none !important; }
 }

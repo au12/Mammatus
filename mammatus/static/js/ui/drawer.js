@@ -96,7 +96,7 @@ export class Drawer {
   }
 
   loading(text) {
-    return h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 48, loop: true }) }), text);
+    return h("div", { class: "empty" }, h("div", { html: logoSVG({ size: 48, loop: true, cls: "mm-formed mm-fast" }) }), text);
   }
 
   emptyPoint() {

@@ -3,7 +3,8 @@
 // The artwork is generated, not drawn: a seeded dart-throwing pass packs pouches of random sizes
 // onto the cloud base in perspective (big overhead at the top, small toward the horizon), sorts
 // them far-to-near and shades each one for a low sun at the bottom left. Every pouch is its own
-// group, so CSS can let them form, sag and wobble independently (see css/logo.css).
+// group with its own timing and amplitudes, so CSS can let them condense out of the deck and then
+// stretch, lean and shrink independently, like slow fluid (see css/logo.css).
 
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
@@ -71,15 +72,44 @@ export function pouchField(o) {
     const lp = 1 - clamp01(Math.hypot(p.x - SUN[0], p.y - SUN[1]) / 112);
     p.tier = Math.max(0, Math.min(3, Math.round(lp * 4.3 - 0.6 + (R() - 0.5) * 1.1)));
     if (p.tier < 3 && R() < 0.22) p.tier = "r";   // a few rose-red ones
-    // animation: forms outward from the sun, then each pouch keeps its own rhythm
-    p.delay = 0.08 + Math.hypot(p.x - SUN[0], p.y - SUN[1]) / 165 + R() * 0.16;
-    p.dur = lerp(2.6, 5.6, R());
-    p.amp = p.r * lerp(0.1, 0.2, R());
-    p.kind = R() < 0.4 ? "a" : R() < 0.6 ? "b" : "c";
+    // (these draws once fed the animation; they stay so a given seed keeps producing the same art)
+    R(); R(); R(); if (R() >= 0.4) R();
     p.attach = p.y - p.r;
-    p.far = d > 0.74;   // streaks in the haze: no contact shadow, no wobble
+    p.far = d > 0.74;   // streaks in the haze: no contact shadow, they only drift
   }
+  motion(P, o);
   return P.sort((a, b) => b.y - b.r * 0.4 - (a.y - a.r * 0.4));   // far (low on the tile) first
+}
+
+// Motion parameters, from their own generator so tuning them never reshuffles the artwork.
+function motion(P, o) {
+  const A = mulberry32(o.seed * 2654435761 + 1);
+  const sign = () => (A() < 0.5 ? -1 : 1);
+  // Forming: the deck does not fill in as a clean wave. Patches of it sag first (a smooth random
+  // field), loosely spreading away from the sun, and big pouches take longer to come down.
+  const p1 = A() * 6.28, p2 = A() * 6.28, p3 = A() * 6.28;
+  const patch = (x, y) => 0.5 + 0.25 * (Math.sin(x * 0.085 + p1) * Math.sin(y * 0.11 + p2) + Math.sin(x * 0.045 + y * 0.06 + p3));
+  for (const p of P) {
+    const dist = clamp01(Math.hypot(p.x - SUN[0], p.y - SUN[1]) / 112);
+    p.delay = 0.1 + 1.5 * dist + 2.1 * patch(p.x, p.y) + 0.5 * A();
+    p.form = lerp(2, 3, A()) + p.r / o.rNear;
+    // Afterwards two slow, unrelated cycles: stretch/shrink (period t) and a sideways lean (period u).
+    p.t = lerp(6.5, 11.5, A());
+    p.u = lerp(9, 16, A());
+    const first = A() < 0.3 ? -1 : 1;   // some start by pulling up instead of sagging
+    p.s = first * lerp(0.09, 0.19, A());
+    p.sag = first * p.r * lerp(0.07, 0.17, A());
+    p.k = p.far ? 0 : sign() * lerp(2, 6, A());
+    p.dx = p.far ? sign() * lerp(1, 2.2, A()) : Math.sign(p.k) * p.r * lerp(0.03, 0.09, A());
+    for (const k of p.kids) {   // lumps bud out of their pouch once it has mostly formed
+      k.delay = p.delay + p.form * lerp(0.45, 0.95, A());
+      k.form = lerp(1.8, 3, A());
+      k.t = lerp(5, 9, A());
+      k.s = lerp(0.06, 0.14, A());
+    }
+  }
+  const lead = Math.min(...P.map((p) => p.delay)) - 0.1;   // the first pouch starts right away
+  for (const p of P) { p.delay -= lead; for (const k of p.kids) k.delay -= lead; }
 }
 
 // A pouch is lit from below: a ramp along the light direction, brightest at the lower rim and
@@ -116,15 +146,19 @@ ${Object.entries(LOBES).map(([k, t]) => `<linearGradient id="${id}b${k}" x1=".72
 }
 
 function lobe(id, p, tier, lump) {
-  const body = `<ellipse cx="${n1(p.x)}" cy="${n1(p.cy)}" rx="${n1(p.rx)}" ry="${n1(p.ry)}" fill="url(#${id}${lump ? "k" : "b"}${tier})"/>`;
+  const anim = lump ? ` class="mm-k" style="transform-origin:${n1(p.x)}px ${n1(p.cy - p.ry)}px;--d:${n2(p.delay)}s;--f:${n2(p.form)}s;--t:${n2(p.t)}s;--s:${n2(p.s)}"` : "";
+  const body = `<ellipse${anim} cx="${n1(p.x)}" cy="${n1(p.cy)}" rx="${n1(p.rx)}" ry="${n1(p.ry)}" fill="url(#${id}${lump ? "k" : "b"}${tier})"/>`;
   if (lump || p.far) return body;
   return `<ellipse cx="${n1(p.x + 0.05 * p.r)}" cy="${n1(p.y + 0.3 * p.r)}" rx="${n1(1.2 * p.rx)}" ry="${n1(1.05 * p.r)}" fill="url(#${id}a)"/>` + body;
 }
 
+// Each pouch is two nested groups so its two cycles can run on separate elements.
 function pouches(id, field) {
   return field.map((p) => {
-    const style = `transform-origin:${n1(p.x)}px ${n1(p.attach)}px;--d:${n2(p.delay)}s;--t:${n2(p.dur)}s;--y:${n2(p.amp)}px`;
-    return `<g class="mm-p mm-${p.far ? "far" : p.kind}" style="${style}">${lobe(id, p, p.tier)}${p.kids.map((k) => lobe(id, k, p.tier, true)).join("")}</g>`;
+    const base = `transform-origin:${n1(p.x)}px ${n1(p.attach)}px;--d:${n2(p.delay)}s;--f:${n2(p.form)}s;--u:${n2(p.u)}s;--x:${n2(p.dx)}px`;
+    if (p.far) return `<g class="mm-p mm-far" style="${base}">${lobe(id, p, p.tier)}</g>`;
+    const style = `${base};--t:${n2(p.t)}s;--y:${n2(p.sag)}px;--s:${n2(p.s)};--k:${n1(p.k)}deg`;
+    return `<g class="mm-p" style="${style}"><g class="mm-q">${lobe(id, p, p.tier)}${p.kids.map((k) => lobe(id, k, p.tier, true)).join("")}</g></g>`;
   }).join("\n");
 }
 
@@ -151,8 +185,8 @@ ${rx ? `<rect x=".4" y=".4" width="99.2" height="99.2" rx="${n1(rx - 0.4)}" fill
 </g>`;
 }
 
-// Inline logo for the app. animate: play the forming animation; loop: keep boiling afterwards
-// (add cls "mm-brief" to stop after a few cycles).
+// Inline logo for the app. animate: play the forming animation; loop: keep it moving afterwards.
+// cls: "mm-brief" stops after a few cycles, "mm-formed" skips the forming, "mm-fast" doubles the tempo.
 export function logoSVG({ size = 32, animate = true, loop = false, cls = "", title = "", detail, seed, id = `mm${(seq++).toString(36)}_` } = {}) {
   const d = detail || (size < 64 ? "small" : "full");
   const classes = ["mm-logo", animate ? "mm-anim" : "", loop ? "mm-loop" : "", cls].filter(Boolean).join(" ");
