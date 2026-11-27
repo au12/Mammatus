@@ -1,15 +1,14 @@
 /* The Mammatus mark in motion (markup from js/ui/logo.js).
    Each pouch is <g class="mm-p"><g class="mm-q">…</g></g>; both share a transform-origin at the
    pouch's attachment to the cloud base. Per pouch: --d/--f when and how long it forms, --t/--u the
-   periods of its two cycles, --s stretch, --y sag, --k lean, --x sideways pull. Lumps (.mm-k) bud later.
+   periods of its two cycles, --s stretch, --y sag, --k lean, --x sideways pull.
    .mm-anim   pouches condense out of the deck, patch by patch
    .mm-loop   afterwards they keep stretching, leaning and shrinking, slowly (.mm-brief: for a while)
    --mm-skip  head start for the forming; --mm-tempo scales the cycle periods */
 .mm-logo { display: block; --mm-settle: cubic-bezier(.2, .62, .25, 1); }
 .mm-q { transform-origin: inherit; }
 
-.mm-anim .mm-p, .mm-anim .mm-k { animation: mm-in var(--f, 3s) var(--mm-settle) calc(var(--d, 0s) - var(--mm-skip, 0s)) both; }
-.mm-anim .mm-k { animation-name: mm-bud; }
+.mm-anim .mm-p { animation: mm-in var(--f, 3s) var(--mm-settle) calc(var(--d, 0s) - var(--mm-skip, 0s)) both; }
 .mm-anim .mm-sun { transform-origin: 23px 95px; animation: mm-rise 2.6s var(--mm-settle) calc(0s - var(--mm-skip, 0s)) both; }
 .mm-anim .mm-haze { animation: mm-fade 3s ease-out calc(0s - var(--mm-skip, 0s)) both; }
 
@@ -19,10 +18,6 @@
 }
 .mm-loop .mm-q, .brand:hover .mm-anim .mm-q {
   animation: mm-stretch calc(var(--t, 9s) * var(--mm-tempo, 1)) linear calc(var(--d, 0s) + var(--f, 3s) - var(--mm-skip, 0s)) var(--mm-n, infinite);
-}
-.mm-loop .mm-k, .brand:hover .mm-anim .mm-k {
-  animation: mm-bud var(--f, 3s) var(--mm-settle) calc(var(--d, 0s) - var(--mm-skip, 0s)) both,
-    mm-swell calc(var(--t, 7s) * var(--mm-tempo, 1)) linear calc(var(--d, 0s) + var(--f, 3s) - var(--mm-skip, 0s)) var(--mm-n, infinite);
 }
 .mm-loop .mm-field, .brand:hover .mm-anim .mm-field {
   transform-origin: 23px 95px;
@@ -41,11 +36,6 @@
   0% { transform: scale(1.32, .04); opacity: 0; }
   45% { opacity: 1; }
   100% { transform: scale(1, 1); opacity: 1; }
-}
-@keyframes mm-bud {
-  0% { transform: scale(.25); opacity: 0; }
-  50% { opacity: 1; }
-  100% { transform: scale(1); opacity: 1; }
 }
 @keyframes mm-rise { 0% { transform: translateY(7px) scale(.6); opacity: 0; } 100% { transform: none; opacity: 1; } }
 @keyframes mm-fade { 0% { opacity: 0; } 100% { opacity: 1; } }
@@ -66,16 +56,10 @@
   75% { transform: translateX(calc(var(--x, 0px) * -1)) skewX(calc(var(--k, 0deg) * -1)); animation-timing-function: cubic-bezier(.12, 0, .39, 0); }
   100% { transform: translateX(0) skewX(0deg); }
 }
-@keyframes mm-swell {
-  0% { transform: scale(1); animation-timing-function: cubic-bezier(.61, 1, .88, 1); }
-  25% { transform: scale(calc(1 + var(--s, .1))); animation-timing-function: cubic-bezier(.37, 0, .63, 1); }
-  75% { transform: scale(calc(1 - var(--s, .1) * .8)); animation-timing-function: cubic-bezier(.12, 0, .39, 0); }
-  100% { transform: scale(1); }
-}
 /* the whole field streams toward the viewer from the vanishing point */
 @keyframes mm-push { 0% { transform: scale(1); } 100% { transform: scale(1.08); } }
 @keyframes mm-glow { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.12); opacity: .88; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .mm-logo .mm-p, .mm-logo .mm-q, .mm-logo .mm-k, .mm-logo .mm-field, .mm-logo .mm-sun, .mm-logo .mm-haze { animation: none !important; }
+  .mm-logo .mm-p, .mm-logo .mm-q, .mm-logo .mm-field, .mm-logo .mm-sun, .mm-logo .mm-haze { animation: none !important; }
 }
