@@ -32,6 +32,8 @@ export class PointCard {
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "alerts" }) }, h("span", { html: icon("alert", 15) }), "Alerts")));
     document.getElementById("ui").append(this.el);
     document.body.classList.add("card-open");
+    this._placed = null;
+    this._size = null;
     this.update();
     this.place();
     this.marker.style.display = "";
@@ -65,27 +67,39 @@ export class PointCard {
       this.alertsEl.replaceChildren(...alerts.slice(0, 3).map((a) => h("button", { class: "alertchip", onclick: () => this.app.selectPoint(p, { tab: "alerts" }) },
         h("i", { style: { background: a.color, boxShadow: `0 0 8px ${a.color}` } }), a.event)));
       if (alerts.length > 3) this.alertsEl.append(h("small", { class: "note" }, `+${alerts.length - 3} more`));
+      this._placed = null;
+      this._size = null;
       this.place();
     } catch { /* alerts are best-effort here */ }
   }
 
+  // Runs on every rendered frame while a point is selected: only touch the DOM when the projected
+  // position actually changed, and move things with transforms (no layout).
   place() {
     if (!this.p) return;
     const cam = this.app.renderer.camera;
     const pr = cam.project(this.p.lon, this.p.lat);
-    const vis = pr.vis > 0;
+    const vis = pr.vis > 0 && Number.isFinite(pr.x) && Number.isFinite(pr.y);
+    const x = Math.round(pr.x * 2) / 2, y = Math.round(pr.y * 2) / 2;
+    const key = `${vis}|${x}|${y}|${!!this.el}`;
+    if (key === this._placed) return;
+    this._placed = key;
     this.marker.style.display = vis ? "" : "none";
-    this.marker.style.left = `${pr.x}px`;
-    this.marker.style.top = `${pr.y}px`;
+    if (vis) this.marker.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
     if (!this.el || this.app.mobile()) return;
-    const w = this.el.offsetWidth || 288, hh = this.el.offsetHeight || 200;
-    let x = pr.x + 18, y = pr.y - hh / 2;
-    if (x + w > innerWidth - 70) x = pr.x - w - 18;
-    x = clamp(x, 12, innerWidth - w - 12);
-    y = clamp(y, 70, innerHeight - hh - 110);
-    this.el.style.left = `${x}px`;
-    this.el.style.top = `${y}px`;
+    this._size ||= { w: this.el.offsetWidth || 288, h: this.el.offsetHeight || 200 };
+    const { w, h: hh } = this._size;
+    let cx = pr.x + 18, cy = pr.y - hh / 2;
+    if (cx + w > innerWidth - 70) cx = pr.x - w - 18;
+    cx = clamp(cx, 12, innerWidth - w - 12);
+    cy = clamp(cy, 70, innerHeight - hh - 110);
+    // the `translate` property composes with the card's pop-in transform animation
+    this.el.style.left = "0px";
+    this.el.style.top = "0px";
+    this.el.style.translate = `${Math.round(cx)}px ${Math.round(cy)}px`;
+    // a card whose point is behind the globe fades out, and must not keep catching clicks on the map
     this.el.style.opacity = vis ? "" : "0";
+    this.el.style.visibility = vis ? "" : "hidden";
   }
 
   close(clearMarker = true) {
