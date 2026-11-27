@@ -253,6 +253,11 @@ def create_app() -> FastAPI:
         field = ".".join(str(x) for x in first.get("loc", [])[1:]) or "request"
         return JSONResponse({"detail": f"Invalid {field}: {first.get('msg', 'bad value')}"}, status_code=422)
 
+    @app.exception_handler(OverflowError)
+    async def overflow_error(request: Request, exc: OverflowError):
+        # a number too large for SQLite or a float conversion is the client's mistake, not a crash
+        return JSONResponse({"detail": "Number out of range"}, status_code=400)
+
     @app.get("/healthz", include_in_schema=False)
     def healthz():
         return {"ok": True, "version": __version__}

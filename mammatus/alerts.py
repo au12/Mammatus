@@ -36,6 +36,67 @@ METRICS = {
     "gust": {"label": "Wind gust", "unit": "mph", "agg": "max", "var": "wind_gusts_10m", "conv": lambda ms: ms * 2.23694},
 }
 DEFAULT_RULE_MODELS = ["ncep_hrrr_conus", "ncep_rrfs_conus", "ncep_nbm_conus", "ncep_gfs_seamless", "ecmwf_ifs"]
+SEVERITIES = ("Extreme", "Severe", "Moderate", "Minor")
+
+
+def clean_rule_params(kind: str, params) -> dict:
+    """Validated, normalized parameters for a notification rule; ValueError says what is wrong.
+
+    Used by the API on the way in and by the engine on the way out, so a rule stored by an older
+    version (or edited by hand) can never take the alert loops down for everyone."""
+    from .data.catalog import METEOGRAM_MODELS
+    from .data.models import REGISTRY
+
+    p = params if isinstance(params, dict) else {}
+    out: dict = {}
+    if kind == "nws":
+        sev = p.get("minSeverity", "Moderate")
+        types = p.get("types", "warnings")
+        if sev not in SEVERITIES:
+            raise ValueError("Bad severity")
+        if types not in ("warnings", "watches", "all"):
+            raise ValueError("Bad alert types")
+        out.update(minSeverity=sev, types=types)
+    elif kind == "threshold":
+        metric = p.get("metric")
+        if not isinstance(metric, str) or metric not in METRICS:
+            raise ValueError("Bad metric")
+        try:
+            value = float(p.get("value"))
+            hours = int(p.get("hours", 48))
+            need = int(p.get("agreement", 1))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("Bad threshold") from None
+        if not math.isfinite(value) or abs(value) > 1e6 or isinstance(p.get("value"), bool):
+            raise ValueError("Bad threshold")
+        if not 6 <= hours <= 240:
+            raise ValueError("Window must be 6-240 hours")
+        if not 1 <= need <= 10:
+            raise ValueError("Bad model agreement")
+        op = p.get("op", "<=" if METRICS[metric]["agg"] == "min" else ">=")
+        if op not in (">=", "<="):
+            raise ValueError("Bad comparison")
+        out.update(metric=metric, value=value, hours=hours, op=op, agreement=need)
+        models = p.get("models")
+        if models is not None:
+            known = {m["id"] for m in METEOGRAM_MODELS}
+            if not isinstance(models, list) or len(models) > 10 or not all(isinstance(m, str) and m in known for m in models):
+                raise ValueError("Bad models")
+            out["models"] = models or None
+    elif kind == "run":
+        model = p.get("model")
+        if not isinstance(model, str) or model not in REGISTRY:
+            raise ValueError("Bad model")
+        out["model"] = model
+        cycles = p.get("cycles")
+        if cycles is not None:
+            if (not isinstance(cycles, list) or len(cycles) > 24
+                    or not all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 23 for c in cycles)):
+                raise ValueError("Bad cycles")
+            out["cycles"] = sorted(set(cycles)) or None
+    elif kind != "precip_soon":
+        raise ValueError("Unknown rule type")
+    return out
 
 
 def push_endpoint_allowed(endpoint: str) -> bool:
@@ -115,10 +176,17 @@ class RulesEngine:
             "SELECT r.*, p.name pname, p.lat, p.lon, p.elev_m FROM rules r LEFT JOIN points p ON p.id=r.point_id "
             "JOIN users u ON u.id=r.user_id WHERE r.kind=? AND r.enabled=1 AND u.disabled=0", (kind,),
         )
+        out = []
         for r in rows:
-            r["params"] = json.loads(r["params"] or "{}")
-            r["state"] = json.loads(r["state"] or "{}")
-        return rows
+            try:
+                r["params"] = clean_rule_params(kind, json.loads(r["params"] or "{}"))
+                state = json.loads(r["state"] or "{}")
+                r["state"] = state if isinstance(state, dict) else {}
+            except (ValueError, TypeError) as exc:
+                log.warning("skipping rule %s: %s", r.get("id"), exc)
+                continue
+            out.append(r)
+        return out
 
     @staticmethod
     def _save_state(rule_id: int, state: dict) -> None:
@@ -181,7 +249,7 @@ class RulesEngine:
         for r in rules:
             by_point.setdefault((round(r["lat"], 3), round(r["lon"], 3), r.get("elev_m")), []).append(r)
         for (lat, lon, elev), group in by_point.items():
-            models = sorted({m for r in group for m in (r["params"].get("models") or DEFAULT_RULE_MODELS)})
+            models = sorted({m for r in group for m in (r["params"].get("models") or DEFAULT_RULE_MODELS) if isinstance(m, str)})
             try:
                 fc = await self.om.meteogram(lat, lon, models, elevation=elev, days=10)
             except FetchError as exc:
@@ -198,21 +266,21 @@ class RulesEngine:
         metric = METRICS.get(p.get("metric"))
         if not metric:
             return
-        window = int(p.get("hours", 48))
-        value = float(p.get("value", 0))
-        op = p.get("op", ">=" if metric["agg"] != "min" else "<=")
-        need = p.get("agreement", 1)  # how many models must agree
+        window = p["hours"]
+        value = p["value"]
+        op = p["op"]
+        need = p["agreement"]  # how many models must agree
         times = fc.get("time") or []
         now = time.time()
-        idx = [i for i, t in enumerate(times) if now <= t <= now + window * 3600]
+        idx = [i for i, t in enumerate(times) if isinstance(t, (int, float)) and now <= t <= now + window * 3600]
         if not idx:
             return
         results = {}
         for m, series in (fc.get("models") or {}).items():
-            arr = series.get(metric["var"])
-            if not arr:
+            arr = series.get(metric["var"]) if isinstance(series, dict) else None
+            if not isinstance(arr, list) or not arr:
                 continue
-            vals = [arr[i] for i in idx if i < len(arr) and arr[i] is not None]
+            vals = [arr[i] for i in idx if i < len(arr) and isinstance(arr[i], (int, float)) and math.isfinite(arr[i])]
             if not vals:
                 continue
             agg = sum(vals) if metric["agg"] == "sum" else (min(vals) if metric["agg"] == "min" else max(vals))
@@ -285,22 +353,24 @@ class RulesEngine:
     async def on_run_update(self, model: str, info, new_steps: list[int]) -> None:
         if not info.complete:
             return
+        cyc = info.client()["cycle"]
         for r in self._rules("run"):
             if r["params"].get("model") != model:
                 continue
-            cycles = r["params"].get("cycles") or [0, 6, 12, 18]
-            if info.client()["cycle"] not in cycles:
+            if cyc not in (r["params"].get("cycles") or [0, 6, 12, 18]):
                 continue
             if r["state"].get("last") == info.run:
                 continue
             r["state"]["last"] = info.run
             self._save_state(r["id"], r["state"])
-            cyc = info.client()["cycle"]
-            await self.notifier.notify(
-                r["user_id"], "run", f"{model.upper()} {cyc:02d}z is in",
-                f"All {len(info.steps)} forecast hours are available.",
-                {"url": f"/#model={model}&run={info.run}"}, tag=f"run-{model}",
-            )
+            try:
+                await self.notifier.notify(
+                    r["user_id"], "run", f"{model.upper()} {cyc:02d}z is in",
+                    f"All {len(info.steps)} forecast hours are available.",
+                    {"url": f"/#model={model}&run={info.run}"}, tag=f"run-{model}",
+                )
+            except Exception:
+                log.exception("run rule %s failed", r["id"])
 
     # -- loops ---------------------------------------------------------------
     async def _loop(self, fn, every: float, initial: float) -> None:

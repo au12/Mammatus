@@ -141,8 +141,12 @@ class OpenMeteo:
 
 
 def normalize_multi(data: dict, models: list[str], variables: list[str]) -> dict:
-    """Split Open-Meteo's suffixed multi-model keys into {model: {var: [...]}}."""
-    h = (data or {}).get("hourly") or {}
+    """Split Open-Meteo's suffixed multi-model keys into {model: {var: [...]}}.
+
+    Only list-valued series are kept, so an unexpected response shape degrades to fewer models."""
+    data = data if isinstance(data, dict) else {}
+    h = data.get("hourly")
+    h = h if isinstance(h, dict) else {}
     out_models: dict[str, dict] = {}
     for m in models:
         series = {}
@@ -150,11 +154,12 @@ def normalize_multi(data: dict, models: list[str], variables: list[str]) -> dict
             arr = h.get(f"{v}_{m}")
             if arr is None and len(models) == 1:
                 arr = h.get(v)
-            if arr is not None:
+            if isinstance(arr, list):
                 series[v] = arr
         if any(any(x is not None for x in arr) for arr in series.values()):
             out_models[m] = series
+    times = h.get("time")
     return {
-        "lat": (data or {}).get("latitude"), "lon": (data or {}).get("longitude"),
-        "elevation": (data or {}).get("elevation"), "time": h.get("time", []), "models": out_models,
+        "lat": data.get("latitude"), "lon": data.get("longitude"),
+        "elevation": data.get("elevation"), "time": times if isinstance(times, list) else [], "models": out_models,
     }

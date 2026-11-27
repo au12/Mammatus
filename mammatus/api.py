@@ -10,13 +10,14 @@ import os
 import re
 import shutil
 import time
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .alerts import DEFAULT_RULE_MODELS, METRICS, push_endpoint_allowed
+from .alerts import DEFAULT_RULE_MODELS, METRICS, clean_rule_params, push_endpoint_allowed
 from .auth import CurrentUser, require_admin, require_user
 from .config import settings
 from .data.catalog import (
@@ -32,6 +33,9 @@ from .security import new_token, token_digest
 
 log = logging.getLogger("mammatus.api")
 router = APIRouter(prefix="/api")
+
+# Ids are SQLite integers: anything outside this range is a bad request, not a server error.
+Id = Annotated[int, Path(ge=1, le=2**62)]
 
 IMMUTABLE = "private, max-age=31536000, immutable"
 
@@ -94,7 +98,7 @@ def runs(request: Request, user: CurrentUser = Depends(require_user)):
 
 
 @router.get("/frame/{model}/{run}/{var}/{fhr}")
-async def frame(model: str, run: str, var: str, fhr: int, request: Request, lod: int = 0,
+async def frame(model: str, run: str, var: str, fhr: int, request: Request, lod: int = Query(0, ge=0, le=2),
                 user: CurrentUser = Depends(require_user)):
     s = svc(request)
     if model not in REGISTRY or model not in s.models_enabled:
@@ -126,7 +130,7 @@ async def radar_times(request: Request, hours: float = Query(2.0, ge=0.5, le=4),
 
 
 @router.get("/radar/frame/{stamp}")
-async def radar_frame(stamp: str, request: Request, lod: int = 0, user: CurrentUser = Depends(require_user)):
+async def radar_frame(stamp: str, request: Request, lod: int = Query(0, ge=0, le=2), user: CurrentUser = Depends(require_user)):
     if lod not in (0, 1, 2):
         raise HTTPException(400, "Bad lod")
     try:
@@ -326,7 +330,7 @@ class PointIn(BaseModel):
 class PointPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=60)
     elev: float | None = Field(default=None, ge=-500, le=9000)
-    sort: int | None = None
+    sort: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
 
 
 def _point_out(r: dict) -> dict:
@@ -356,7 +360,7 @@ async def add_point(body: PointIn, request: Request, user: CurrentUser = Depends
 
 
 @router.patch("/points/{pid}")
-def update_point(pid: int, body: PointPatch, user: CurrentUser = Depends(require_user)):
+def update_point(pid: Id, body: PointPatch, user: CurrentUser = Depends(require_user)):
     db = get_db()
     row = db.one("SELECT * FROM points WHERE id=? AND user_id=?", (pid, user.id))
     if not row:
@@ -371,7 +375,7 @@ def update_point(pid: int, body: PointPatch, user: CurrentUser = Depends(require
 
 
 @router.delete("/points/{pid}")
-def delete_point(pid: int, user: CurrentUser = Depends(require_user)):
+def delete_point(pid: Id, user: CurrentUser = Depends(require_user)):
     get_db().execute("DELETE FROM points WHERE id=? AND user_id=?", (pid, user.id))
     return {"ok": True}
 
@@ -383,7 +387,7 @@ RULE_KINDS = ("nws", "threshold", "precip_soon", "run")
 
 class RuleIn(BaseModel):
     kind: str
-    pointId: int | None = None
+    pointId: int | None = Field(default=None, ge=1, le=2**62)
     params: dict = Field(default_factory=dict)
     enabled: bool = True
 
@@ -391,34 +395,19 @@ class RuleIn(BaseModel):
 def _validate_rule(body: RuleIn, user: CurrentUser) -> dict:
     if body.kind not in RULE_KINDS:
         raise HTTPException(400, "Unknown rule type")
-    p = body.params or {}
-    if len(json.dumps(p)) > 2000:
-        raise HTTPException(400, "Rule too large")
+    raw = body.params or {}
+    try:
+        if len(json.dumps(raw, allow_nan=False)) > 2000:
+            raise HTTPException(400, "Rule too large")
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Bad rule parameters")
     if body.kind in ("nws", "threshold", "precip_soon"):
         if not body.pointId or not get_db().one("SELECT 1 x FROM points WHERE id=? AND user_id=?", (body.pointId, user.id)):
             raise HTTPException(400, "Pick one of your saved points")
-    if body.kind == "nws":
-        if p.get("minSeverity", "Moderate") not in ("Extreme", "Severe", "Moderate", "Minor"):
-            raise HTTPException(400, "Bad severity")
-        if p.get("types", "warnings") not in ("warnings", "watches", "all"):
-            raise HTTPException(400, "Bad alert types")
-    if body.kind == "threshold":
-        if p.get("metric") not in METRICS:
-            raise HTTPException(400, "Bad metric")
-        try:
-            float(p.get("value"))
-            hours = int(p.get("hours", 48))
-        except (TypeError, ValueError):
-            raise HTTPException(400, "Bad threshold")
-        if not 6 <= hours <= 240:
-            raise HTTPException(400, "Window must be 6-240 hours")
-        models = p.get("models")
-        if models is not None and (not isinstance(models, list) or len(models) > 10):
-            raise HTTPException(400, "Bad models")
-    if body.kind == "run":
-        if p.get("model") not in REGISTRY:
-            raise HTTPException(400, "Bad model")
-    return p
+    try:
+        return clean_rule_params(body.kind, raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.get("/rules")
@@ -442,7 +431,7 @@ def add_rule(body: RuleIn, user: CurrentUser = Depends(require_user)):
 
 
 @router.put("/rules/{rid}")
-def update_rule(rid: int, body: RuleIn, user: CurrentUser = Depends(require_user)):
+def update_rule(rid: Id, body: RuleIn, user: CurrentUser = Depends(require_user)):
     p = _validate_rule(body, user)
     db = get_db()
     if not db.one("SELECT 1 x FROM rules WHERE id=? AND user_id=?", (rid, user.id)):
@@ -453,7 +442,7 @@ def update_rule(rid: int, body: RuleIn, user: CurrentUser = Depends(require_user
 
 
 @router.delete("/rules/{rid}")
-def delete_rule(rid: int, user: CurrentUser = Depends(require_user)):
+def delete_rule(rid: Id, user: CurrentUser = Depends(require_user)):
     get_db().execute("DELETE FROM rules WHERE id=? AND user_id=?", (rid, user.id))
     return {"ok": True}
 
@@ -518,7 +507,7 @@ def push_devices(user: CurrentUser = Depends(require_user)):
 
 
 @router.delete("/push/devices/{sid}")
-def push_device_delete(sid: int, user: CurrentUser = Depends(require_user)):
+def push_device_delete(sid: Id, user: CurrentUser = Depends(require_user)):
     get_db().execute("DELETE FROM push_subs WHERE id=? AND user_id=?", (sid, user.id))
     return {"ok": True}
 
@@ -596,7 +585,7 @@ def admin_users(admin: CurrentUser = Depends(require_admin)):
 
 
 @router.patch("/admin/users/{uid}")
-def admin_user_update(uid: int, body: UserPatch, request: Request, admin: CurrentUser = Depends(require_admin)):
+def admin_user_update(uid: Id, body: UserPatch, request: Request, admin: CurrentUser = Depends(require_admin)):
     db = get_db()
     row = db.one("SELECT * FROM users WHERE id=?", (uid,))
     if not row:
@@ -618,7 +607,7 @@ def admin_user_update(uid: int, body: UserPatch, request: Request, admin: Curren
 
 
 @router.delete("/admin/users/{uid}")
-def admin_user_delete(uid: int, request: Request, admin: CurrentUser = Depends(require_admin)):
+def admin_user_delete(uid: Id, request: Request, admin: CurrentUser = Depends(require_admin)):
     if uid == admin.id:
         raise HTTPException(400, "You can't delete yourself.")
     get_db().execute("DELETE FROM users WHERE id=?", (uid,))
@@ -627,7 +616,7 @@ def admin_user_delete(uid: int, request: Request, admin: CurrentUser = Depends(r
 
 
 @router.post("/admin/users/{uid}/reset")
-def admin_user_reset(uid: int, request: Request, admin: CurrentUser = Depends(require_admin)):
+def admin_user_reset(uid: Id, request: Request, admin: CurrentUser = Depends(require_admin)):
     db = get_db()
     if not db.one("SELECT 1 x FROM users WHERE id=?", (uid,)):
         raise HTTPException(404, "Not found")
@@ -640,7 +629,7 @@ def admin_user_reset(uid: int, request: Request, admin: CurrentUser = Depends(re
 
 
 @router.post("/admin/users/{uid}/signout")
-def admin_user_signout(uid: int, admin: CurrentUser = Depends(require_admin)):
+def admin_user_signout(uid: Id, admin: CurrentUser = Depends(require_admin)):
     get_db().execute("DELETE FROM sessions WHERE user_id=?", (uid,))
     return {"ok": True}
 

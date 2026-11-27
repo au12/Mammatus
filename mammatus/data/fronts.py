@@ -37,9 +37,14 @@ KEYWORDS = set(FRONT_TYPES) | {"HIGHS", "LOWS"}
 _VALID = re.compile(r"^(?:(\d+)\s*HR\s+PROG\s+)?VALID\s+(\d{6})Z", re.I)
 
 
+def _digits(s: str) -> bool:
+    """ASCII digits only: str.isdigit() also accepts characters like '²' that int() rejects."""
+    return s.isascii() and s.isdigit()
+
+
 def decode_point(code: str) -> tuple[float, float] | None:
     """Coded position -> (lon, lat). 7 digits: LLLllll in tenths; 4-5 digits: LLll(l) whole degrees."""
-    if not code.isdigit():
+    if not _digits(code):
         return None
     n = len(code)
     if n == 7:
@@ -117,7 +122,7 @@ def parse_bulletin(text: str, issued: datetime) -> list[dict]:
         if tokens[0].upper() in KEYWORDS:
             entry = [tokens[0].upper(), tokens[1:]]
             cur["_entries"].append(entry)
-        elif entry is not None and all(t.isdigit() for t in tokens):
+        elif entry is not None and all(_digits(t) for t in tokens):
             entry[1].extend(tokens)  # wrapped continuation line
         else:
             entry = None
@@ -129,7 +134,7 @@ def parse_bulletin(text: str, issued: datetime) -> list[dict]:
                 target = highs if kw == "HIGHS" else lows
                 for i in range(0, len(tokens) - 1, 2):
                     p = decode_point(tokens[i + 1])
-                    if p and tokens[i].isdigit() and 850 <= int(tokens[i]) <= 1090:
+                    if p and _digits(tokens[i]) and 850 <= int(tokens[i]) <= 1090:
                         target.append([p[0], p[1], int(tokens[i])])
                 continue
             strength = None

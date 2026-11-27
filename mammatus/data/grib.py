@@ -77,17 +77,20 @@ def parse_ecmwf_index(text: str) -> list[Record]:
         ln = ln.strip()
         if not ln:
             continue
+        # one malformed line (truncated download, format change) must not sink the whole index
         try:
             d = json.loads(ln)
-        except json.JSONDecodeError:
+            off, length = int(d["_offset"]), int(d["_length"])
+            param = str(d.get("param", ""))
+            step = str(d.get("step", "0"))
+            if "-" in step:
+                a, b = (int(x) for x in step.split("-", 1))
+            else:
+                a = b = int(step)
+        except (ValueError, KeyError, TypeError, AttributeError):
             continue
-        off, length = int(d["_offset"]), int(d["_length"])
-        param = d.get("param", "")
-        step = str(d.get("step", "0"))
-        if "-" in step:
-            a, b = (int(x) for x in step.split("-", 1))
-        else:
-            a = b = int(step)
+        if off < 0 or length <= 0:
+            continue
         rec = Record(
             start=off, end=off + length - 1, param=param, levtype=d.get("levtype", ""),
             levelist=str(d.get("levelist", "")), t0=a, t1=b,

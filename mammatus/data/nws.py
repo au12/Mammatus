@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 import time
 
@@ -40,10 +41,20 @@ COLORS = {
 SEVERITY_RANK = {"Extreme": 4, "Severe": 3, "Moderate": 2, "Minor": 1, "Unknown": 0}
 
 
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _round_ring(ring):
+    """Rounded, de-duplicated ring of (lon, lat); points that are not finite pairs are dropped."""
     out = []
     last = None
-    for lon, lat in ring:
+    for pt in ring if isinstance(ring, (list, tuple)) else ():
+        if not isinstance(pt, (list, tuple)) or len(pt) < 2 or not (_num(pt[0]) and _num(pt[1])):
+            continue
+        lon, lat = pt[0], pt[1]
+        if abs(lat) > 90 or abs(lon) > 360:
+            continue
         p = (round(lon, 3), round(lat, 3))
         if p != last:
             out.append(p)
@@ -51,36 +62,68 @@ def _round_ring(ring):
     return out
 
 
+def _text(v, default: str = "") -> str:
+    return v if isinstance(v, str) else default
+
+
 def compact(feature: dict) -> dict | None:
-    p = feature.get("properties") or {}
+    """The fields Mammatus uses from one NWS alert feature, or None if it should be skipped.
+
+    Upstream JSON is trusted for nothing: an unexpected shape anywhere skips that part (or that
+    alert), never the whole list."""
+    if not isinstance(feature, dict):
+        return None
+    p = feature.get("properties")
+    if not isinstance(p, dict):
+        p = {}
     if p.get("status") not in (None, "Actual"):
         return None
-    event = p.get("event") or "Alert"
+    event = _text(p.get("event")) or "Alert"
     geom = feature.get("geometry")
     polys = None
-    if geom and geom.get("type") == "Polygon":
-        polys = [[_round_ring(r) for r in geom["coordinates"]]]
-    elif geom and geom.get("type") == "MultiPolygon":
-        polys = [[_round_ring(r) for r in poly] for poly in geom["coordinates"]]
-    same = (p.get("geocode") or {}).get("SAME") or []
-    fips = sorted({s[1:] for s in same if len(s) == 6 and s.isdigit()})
+    if isinstance(geom, dict):
+        coords = geom.get("coordinates")
+        if geom.get("type") == "Polygon" and isinstance(coords, list):
+            rings = [r for r in (_round_ring(r) for r in coords) if len(r) >= 3]
+            polys = [rings] if rings else None
+        elif geom.get("type") == "MultiPolygon" and isinstance(coords, list):
+            polys = [rings for rings in ([r for r in (_round_ring(r) for r in poly) if len(r) >= 3]
+                                         for poly in coords if isinstance(poly, list)) if rings] or None
+    geocode = p.get("geocode")
+    same = geocode.get("SAME") if isinstance(geocode, dict) else None
+    fips = sorted({s[1:] for s in same if isinstance(s, str) and len(s) == 6 and s.isascii() and s.isdigit()}) if isinstance(same, list) else []
+    severity = _text(p.get("severity"), "Unknown")
     return {
-        "id": p.get("id") or feature.get("id"),
+        "id": _text(p.get("id")) or _text(feature.get("id")) or None,
         "event": event,
-        "severity": p.get("severity") or "Unknown",
-        "urgency": p.get("urgency"),
-        "certainty": p.get("certainty"),
-        "headline": p.get("headline") or event,
-        "area": p.get("areaDesc") or "",
-        "sent": p.get("sent"),
-        "onset": p.get("onset") or p.get("effective"),
-        "ends": p.get("ends") or p.get("expires"),
-        "sender": p.get("senderName"),
+        "severity": severity if severity in SEVERITY_RANK else "Unknown",
+        "urgency": _text(p.get("urgency")) or None,
+        "certainty": _text(p.get("certainty")) or None,
+        "headline": _text(p.get("headline")) or event,
+        "area": _text(p.get("areaDesc")),
+        "sent": _text(p.get("sent")) or None,
+        "onset": _text(p.get("onset")) or _text(p.get("effective")) or None,
+        "ends": _text(p.get("ends")) or _text(p.get("expires")) or None,
+        "sender": _text(p.get("senderName")) or None,
         "color": COLORS.get(event, "#E0E0E0"),
         "polys": polys,
         "fips": fips if not polys else [],
-        "msgType": p.get("messageType"),
+        "msgType": _text(p.get("messageType")) or None,
     }
+
+
+def compact_all(data) -> list[dict]:
+    feats = data.get("features") if isinstance(data, dict) else None
+    out = []
+    for f in feats if isinstance(feats, list) else ():
+        try:
+            c = compact(f)
+        except Exception:  # noqa: BLE001 - one bad alert must not hide the rest
+            log.warning("skipping malformed NWS alert", exc_info=True)
+            continue
+        if c and c["id"]:
+            out.append(c)
+    return out
 
 
 class NWSService:
@@ -96,7 +139,7 @@ class NWSService:
                 return self._all[1]
             data = await get_json(f"{API}/alerts/active", params={"status": "actual"},
                                   headers={"Accept": "application/geo+json"}, timeout=40)
-            items = [c for c in (compact(f) for f in (data or {}).get("features", [])) if c]
+            items = compact_all(data)
             items.sort(key=lambda a: (-SEVERITY_RANK.get(a["severity"], 0), a["event"]))
             self._all = (time.time(), items)
             return items
@@ -108,7 +151,7 @@ class NWSService:
             return hit[1]
         data = await get_json(f"{API}/alerts/active", params={"point": f"{key[0]},{key[1]}"},
                               headers={"Accept": "application/geo+json"}, timeout=30)
-        items = [c for c in (compact(f) for f in (data or {}).get("features", [])) if c]
+        items = compact_all(data)
         self._points[key] = (time.time(), items)
         if len(self._points) > 500:
             oldest = sorted(self._points.items(), key=lambda kv: kv[1][0])[:250]
@@ -123,13 +166,15 @@ class NWSService:
         if not alert_id.startswith(f"{API}/alerts/"):
             alert_id = f"{API}/alerts/{alert_id.split('/')[-1]}"
         data = await get_json(alert_id, headers={"Accept": "application/geo+json"})
-        p = (data or {}).get("properties") or {}
+        p = data.get("properties") if isinstance(data, dict) else None
+        if not isinstance(p, dict):
+            p = {}
         out = {
             "id": p.get("id"), "event": p.get("event"), "headline": p.get("headline"),
             "description": p.get("description"), "instruction": p.get("instruction"),
             "area": p.get("areaDesc"), "sender": p.get("senderName"), "onset": p.get("onset"),
             "ends": p.get("ends") or p.get("expires"), "severity": p.get("severity"),
-            "color": COLORS.get(p.get("event") or "", "#E0E0E0"),
+            "color": COLORS.get(p.get("event") if isinstance(p.get("event"), str) else "", "#E0E0E0"),
         }
         self._details[alert_id] = (time.time(), out)
         return out
