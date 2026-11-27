@@ -46,9 +46,11 @@ const SCHEMA = {
   mgRange: oneOf(2, 5, 10, 16),
   sndModel: str(60),
   parcel: oneOf("sb", "ml", "mu"),
+  skyView: oneOf("side", "ground"),
+  skySource: oneOf("auto", "hrrr", "rrfs", "gfs", "ecmwf_ifs025", "icon_seamless", "gem_seamless"),
 };
 for (const k of ["smooth", "lightningAnim", "lowPower", "rememberView", "alerts", "lightning", "fronts", "liveClouds",
-  "particles", "cities", "counties", "realistic"]) SCHEMA[k] = bool;
+  "particles", "cities", "counties", "realistic", "skyObs", "skySound", "skyTilt"]) SCHEMA[k] = bool;
 
 export function sanitizePrefs(raw) {
   const out = {};

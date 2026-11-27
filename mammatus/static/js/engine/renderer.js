@@ -261,7 +261,7 @@ export class Renderer extends EventTarget {
   }
 
   requestRender() {
-    if (this._raf || this.lost) return;
+    if (this._raf || this.lost || this.paused) return;
     this._raf = requestAnimationFrame((t) => this._frame(t));
   }
 

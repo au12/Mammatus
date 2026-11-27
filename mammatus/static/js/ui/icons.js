@@ -48,6 +48,8 @@ const P = {
   send: '<path d="M4 12 20 4l-5 16-3.5-6.5z"/><path d="M11.5 13.5 20 4"/>',
   mountain: '<path d="m3 19.5 6.5-11 4 6 2.5-3.5 5 8.5z"/>',
   bolt: '<path d="M13.2 2.8 5.8 13.2h5.4l-1.4 8 7.4-10.4h-5.4z"/>',
+  more: '<circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/>',
+  sky: '<path d="M3.5 20.5h17"/><path d="M6.5 16.5h7.8a2.9 2.9 0 0 0 .3-5.8 4.4 4.4 0 0 0-8.4-.9 3.4 3.4 0 0 0 .3 6.7z"/><path d="M15.5 5.2a3.4 3.4 0 0 1 4.9 3.9"/><path d="M14 3.5l.2-.1M19.6 4l.1.1"/>',
   front: '<path d="M3 16c3.2-1.2 5.3-4.6 9-4.6s5.8 3.4 9 4.6"/><path d="m6.2 14.4-.9-3.3 3.1 1.6z" fill="currentColor"/><path d="M14.2 11.8a2 2 0 0 1 3.4 1.6" />',
 };
 

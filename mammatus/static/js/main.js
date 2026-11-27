@@ -23,6 +23,7 @@ import { Lightning } from "./lightning.js";
 import { Fronts } from "./fronts.js";
 import * as pwa from "./pwa.js";
 import { sanitizePrefs } from "./prefs.js";
+import { SkyView } from "./sky/view.js";
 
 const splashMsg = (t) => { const m = $("#splash .msg"); if (m) m.textContent = t; };
 const VIEW_KEY = "mm.view";
@@ -75,6 +76,7 @@ class App {
     this.lightning = new Lightning(this);
     this.fronts = new Fronts(this);
     this.buildUI();
+    this.sky = new SkyView(this);
     this.bindLayers();
     this.bindControls();
     this.bindKeys();
@@ -88,7 +90,7 @@ class App {
     if (this.prefs.lightning) this.setLightning(true);
     if (this.prefs.fronts) this.setFronts(true);
     if (this.prefs.liveClouds !== false) this.loadLiveClouds();
-    if (["point", "alert", "layer", "model", "ll"].some((k) => deepLink.has(k))) this.handleDeepLink(deepLink);
+    if (["point", "alert", "layer", "model", "ll", "sky"].some((k) => deepLink.has(k))) this.handleDeepLink(deepLink);
     window.addEventListener("hashchange", () => this.handleDeepLink());
     r.requestRender();
     // hide the splash once the globe has drawn
@@ -281,6 +283,17 @@ class App {
     if (home) cam.flyTo({ lon: home.lon, lat: home.lat, zoom: 6.4 });
     else cam.fitBounds([-126, 23, -66, 50]);
     this.renderer.poke();
+  }
+
+  // Sky view for a point (the selected one, else the map centre)
+  openSky(p = null) {
+    const cam = this.renderer.camera;
+    p ||= this.selected || { lat: cam.lat, lon: cam.lon, name: this.nearestCity(cam.lat, cam.lon, 25)?.name || null };
+    if (!p.name) p = { ...p, name: this.nearestCity(p.lat, p.lon, 25)?.name || null };
+    this.selected = p;
+    cam.flyTo({ lon: p.lon, lat: p.lat, zoom: Math.max(Math.min(cam.zoom, 8.2), 7.6) }, 650);
+    this.renderer.poke();
+    this.sky.enter(p);
   }
 
   locate() {
@@ -680,9 +693,18 @@ class App {
   handleDeepLink(params = null) {
     const hp = params || hashParams();
     // a link that picks the view wins over the first-visit fly-in, which is still on a timer at startup
-    if (["point", "alert", "ll"].some((k) => hp.has(k))) this.introFly = false;
+    if (["point", "alert", "ll", "sky"].some((k) => hp.has(k))) this.introFly = false;
+    if (hp.get("sky") && !this.sky.isOpen) {
+      const [lat, lon] = hp.get("sky").split(",").map(Number);
+      if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 89 && Math.abs(lon) <= 180) {
+        const saved = this.savedPoint({ lat, lon });
+        setTimeout(() => this.openSky(saved ? { ...saved } : { lat, lon }), 300);
+      }
+      return;
+    }
     if (hp.get("point")) {
       const p = this.points.find((x) => x.id === +hp.get("point"));
+      if (p && hp.get("tab") === "sky") { setTimeout(() => this.openSky({ ...p }), 300); return; }
       if (p) this.selectPoint({ ...p }, { fly: true, tab: hp.get("tab") === "meteogram" ? "forecast" : hp.get("tab") || "forecast" });
     } else if (hp.get("alert")) {
       const p = this.points[0];
@@ -717,10 +739,12 @@ class App {
     else p.layer = s.type === "radar" ? "radar" : `sat:${s.product}`;
     p.ll = `${cam.lat.toFixed(2)},${cam.lon.toFixed(2)},${cam.zoom.toFixed(1)}`;
     if (p.layer && p.layer.startsWith("sat")) delete p.layer;
+    if (this.sky?.isOpen && this.sky.p) p.sky = `${this.sky.p.lat.toFixed(3)},${this.sky.p.lon.toFixed(3)}`;
     setHash(p);
   }, 400);
 
   updateAttribution() {
+    if (this.sky?.isOpen) return;
     const s = this.state.source;
     let t = "";
     if (s?.type === "model") { const m = this.model(s.model); t = `${m.name}${m.attribution ? ` · ${m.attribution}` : " · NOAA"}`; }
@@ -737,6 +761,7 @@ class App {
     document.addEventListener("keydown", (e) => {
       if (e.target.closest("input, textarea, select, [contenteditable]") || e.metaKey || e.ctrlKey || e.altKey) return;
       if (document.querySelector(".modal-back")) return;
+      if (this.sky?.key(e)) { e.preventDefault(); return; }
       const k = e.key;
       if (k === " ") { e.preventDefault(); this.togglePlay(); }
       else if (k === "ArrowRight") { e.preventDefault(); this.stepBy(1); }
@@ -744,6 +769,7 @@ class App {
       else if (k === "/") { e.preventDefault(); this.search.open(); }
       else if (k === "l" || k === "L") this.picker.toggle();
       else if (k === "g" || k === "G") this.cycleMode();
+      else if (k === "s" || k === "S") this.openSky();
       else if ((k === "f" || k === "F") && this.selected) this.selectPoint(this.selected, { tab: "forecast" });
       else if (k === "+" || k === "=") this.zoomBy(0.6);
       else if (k === "-") this.zoomBy(-0.6);
