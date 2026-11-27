@@ -99,8 +99,9 @@ export class SkyView {
     this.setPoint(p, true);
     this.intro = { t0: performance.now(), dur: reducedMotion() ? 10 : 2300, dir: 1 };
     this.canvas.classList.add("in");
-    // the map stops drawing underneath
-    setTimeout(() => { if (this.isOpen) app.renderer.paused = true; }, 700);
+    // the map stops drawing underneath (once it has drawn at all: the app's start-up waits on that)
+    const pause = () => { if (!this.isOpen || this.leaving) return; if (app.renderer.frames > 0) app.renderer.paused = true; else setTimeout(pause, 300); };
+    setTimeout(pause, 700);
     this._onIndex = () => this.onTime();
     app.layers.addEventListener("index", this._onIndex);
     this._onResize = () => { this.r.resize(); this.dirty = true; };
@@ -334,7 +335,7 @@ export class SkyView {
     const ambBot = ground.map((g, i) => g * (sunCol[i] * s0 * 1.2 + sky[i] * 0.5) + sky[i] * 0.3 + moonAmb * 0.3);
     const glow = this.cityGlow ?? 0.2;
     const cityCol = [1.0, 0.56, 0.24].map((x) => x * glow * 0.05 * night);
-    const exposure = lerp(1.0, 5.5, night) * lerp(1, 1.2, golden);
+    const exposure = lerp(1.0, 4.2, night) * lerp(1, 1.2, golden);
     const sfc = this.cur?.head.sfc || {};
     const snowing = this.cur?.head.precip?.kind === "snow";
     const snow = (sfc.t2m != null && sfc.t2m < 272.5 && (snowing || Math.abs(lat) > 40)) ? (snowing ? 0.75 : 0.35) : 0;
@@ -539,7 +540,7 @@ export class SkyView {
       this.dirty = false;
       try {
         // with nothing loaded yet the empty sky still draws, so the swoop happens
-        this.draw(now, { moving: interacting || !!this.intro || !!this.modeAnim || !this.display.A, dataChanged: !!this.display.morph || changed, flashes: fl.lights, bolts: fl.bolts });
+        this.draw(now, { moving: interacting || !!this.intro || !!this.modeAnim || !this.display.A, dataChanged: !!this.display.morph || changed || fl.lights.length > 0, flashes: fl.lights, bolts: fl.bolts });
         this.fails = 0;
       } catch (err) {
         if (!this.fails) console.error("Mammatus: sky view failed to draw", err);
@@ -557,6 +558,8 @@ export class SkyView {
   }
 
   draw(now, { moving, dataChanged, flashes, bolts }) {
+    // opened from a link while the app was still starting: the sky is what shows, so lift the splash
+    if (!this.splashGone) { this.splashGone = true; const sp = document.getElementById("splash"); if (sp && !sp.classList.contains("gone")) { sp.classList.add("gone"); setTimeout(() => sp.remove(), 1400); } }
     const cam = this.camera(now);
     const e = this.env();
     this.r.setSunLUT(e.lut);
@@ -565,6 +568,19 @@ export class SkyView {
     if (fa && this._windKey !== D.A) { this.r.setWind(fa.wind); this._windKey = D.A; }
     const bands = mergeBands([...(fa?.bands || []), ...(fb && D.mix > 0.002 ? fb.bands : [])]);
     const mam = Math.max(fa?.head.mammatus || 0, D.mix > 0.002 ? fb?.head.mammatus || 0 : 0);
+    // side view: a storm cell standing in the cut-away part still flashes, on the face of the cut
+    if (cam.cut[3] > 0.5 && (flashes?.length || bolts?.length)) {
+      const [nx, ny, cz] = cam.cut;
+      const push = (x, y) => Math.max(0, cz + 2.5 - (x * nx + y * ny));
+      flashes = (flashes || []).map((f) => { const d = push(f.x, f.y); return d ? { ...f, x: f.x + nx * d, y: f.y + ny * d } : f; });
+      bolts = (bolts || []).map((b) => {
+        const d = push(b.segs[0], b.segs[1]);
+        if (!d) return b;
+        const segs = b.segs.slice();
+        for (let i = 0; i < segs.length; i += 7) { segs[i] += nx * d; segs[i + 1] += ny * d; segs[i + 3] += nx * d; segs[i + 4] += ny * d; }
+        return { ...b, segs };
+      });
+    }
     const s = {
       cam, env: e, time: this.driftT || 0, moving, dataChanged,
       weather: { a: D.A, b: D.B || D.A, mix: D.mix, appear: this.appear.v, mammatus: mam, bands, ext: 0.4 },
@@ -1000,9 +1016,14 @@ export class SkyView {
   }
 
   async saveImage() {
-    if (!this.lastState) return;
+    if (!this.lastState || this._saving) return;
+    this._saving = true;
+    try { await this._saveImage(); } catch (err) { toastError(err, "Couldn't save the image"); } finally { this._saving = false; }
+  }
+
+  async _saveImage() {
     const blob = await this.r.snapshot(this.lastState);
-    if (!blob) return;
+    if (!blob) throw new Error("The picture couldn't be captured");
     const img = await createImageBitmap(blob);
     const c = document.createElement("canvas");
     c.width = img.width; c.height = img.height;

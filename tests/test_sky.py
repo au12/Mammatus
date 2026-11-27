@@ -56,6 +56,14 @@ def test_classify_rain_and_virga():
     assert sky.classify(cover, liq, ice, r, s, cum, t, {})[0]["precip"] == "virga"
 
 
+def test_mid_level_ice_deck_is_altostratus():
+    # a snow-laden deck based at 2.3 km with virga under it: altostratus, not nimbostratus or cirrostratus
+    cover, liq, ice, r, s, cum, t = column([(2300, 7700, 1.0, 0.02, 0.05, 0.15)], t_sfc=280.0)
+    r[int(1000 / sky.DZ):int(2200 / sky.DZ)] = 0.02
+    got = sky.classify(cover, liq, ice, r, s, cum, t, {})
+    assert got[0]["genus"] == "As" and got[0]["precip"] == "virga"
+
+
 def test_deep_shield_splits_into_as_and_cs():
     got = sky.classify(*column([(3000, 11500, 0.98, 0.1, 0.03, 0.15)]), {})
     assert names(got) == ["As", "Cs"]

@@ -341,7 +341,7 @@ def classify(cover, liq, ice, rain, snow, cum, t, sfc: dict, base0: float | None
             species = "with anvil" if (top_ice > 0.8 and top >= 8000) else None
         elif base < 2500 and depth >= 2500 and conv >= 0.55:
             genus, species = "TCu", "congestus"
-        elif depth >= 2500 and base < 3000 and (cov >= 0.8 or (precip in ("rain", "snow") and cov >= 0.5)):
+        elif depth >= 2500 and base < 3000 and (cov >= 0.8 or precip in ("rain", "snow")) and (base < 2000 or precip in ("rain", "snow")) and (cov >= 0.5):
             genus = "Ns"
         elif base < 70 and top < 1500 and ((vis is not None and vis < 1000) or (vis is None and depth <= 500)):
             genus = "Fg"
@@ -354,7 +354,7 @@ def classify(cover, liq, ice, rain, snow, cum, t, sfc: dict, base0: float | None
                     genus = "Sc"
             else:
                 genus = "St" if (conv < 0.3 and cov >= 0.85) else "Sc"
-        elif icef > 0.75 or base >= 7000 or (base >= 5000 and icef > 0.5):
+        elif base >= 6000 or (base >= 4500 and icef > 0.6 and t_base < 248.0):
             if cov >= 0.8 and depth >= 700:
                 genus = "Cs"
             elif conv >= 0.65 and depth < 700:
@@ -362,14 +362,24 @@ def classify(cover, liq, ice, rain, snow, cum, t, sfc: dict, base0: float | None
             else:
                 genus = "Ci"
         else:
-            genus = "As" if (cov >= 0.8 and conv < 0.5 and depth >= 450) else "Ac"
+            # mid-level: a grey sheet (thick or wide) or patches and rolls
+            genus = "As" if (cov >= 0.8 and conv < 0.5 and (depth >= 450 or icef > 0.5)) else "Ac"
         layers.append({
             "genus": genus, "name": GENERA[genus], "species": species,
             "base": round(base), "top": round(top), "cover": round(cov, 2),
             "phase": "ice" if icef > 0.75 else "mixed" if icef > 0.2 else "liquid",
             "tBase": round(t_base, 1), "tTop": round(t_top, 1), "precip": precip, "conv": round(conv, 2),
         })
-    return layers
+    # neighbouring layers of the same kind are one cloud
+    out: list[dict] = []
+    for ly in layers:
+        prev = out[-1] if out else None
+        if prev and prev["genus"] == ly["genus"] and ly["base"] - prev["top"] <= 2 * DZ:
+            prev.update(top=ly["top"], cover=max(prev["cover"], ly["cover"]), tTop=ly["tTop"],
+                        precip=prev["precip"] if prev["precip"] != "none" else ly["precip"])
+        else:
+            out.append(ly)
+    return out
 
 
 # --------------------------------------------------------------------------- packing

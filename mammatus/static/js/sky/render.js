@@ -482,9 +482,13 @@ export class SkyRenderer {
       for (let i = 0; i < nb; i++) { bands[i * 2] = s.weather.bands[i][0]; bands[i * 2 + 1] = s.weather.bands[i][1]; }
       gl.uniform2fv(u.u_bands, bands);
       gl.uniform1i(u.u_nbands, nb);
-      gl.uniform1i(u.u_maxSteps, this.maxSteps);
+      gl.uniform1i(u.u_maxSteps, Math.round(this.maxSteps * (s.cam.cut[3] > 0.5 ? 1 : 1.35)));   // from the ground rays cross the whole depth of the clouds
       gl.uniform1f(u.u_far, s.cam.far);
       gl.uniform3fv(u.u_cityCol, e.cityCol);
+      const fc = new Float32Array(8);
+      (s.flashes || []).slice(0, 2).forEach((f, i) => { fc.set([f.x, f.y, f.z, f.i], i * 4); });
+      gl.uniform4fv(u.u_flash, fc);
+      gl.uniform3fv(u.u_flashCol, [0.78, 0.82, 1.0]);
       this._quad(p);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -591,8 +595,14 @@ export class SkyRenderer {
     gl.disable(gl.BLEND);
   }
 
-  snapshot(s) {
-    return new Promise((resolve) => { this.render(s, performance.now()); this.canvas.toBlob(resolve, "image/png"); });
+  // a still: a dozen frames accumulated with the camera still, so the picture is as clean as the live view
+  snapshot(s, frames = 12) {
+    return new Promise((resolve) => {
+      const still = { ...s, moving: false, dataChanged: false };
+      for (let i = 0; i < frames - 1; i++) this.render(still, performance.now());
+      this.render(still, performance.now());
+      this.canvas.toBlob(resolve, "image/png");
+    });
   }
 
   dispose() {

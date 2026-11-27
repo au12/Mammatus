@@ -131,7 +131,7 @@ float wcDecode(float c) { return c > 0.002 ? exp2(((c * 255.0 - 1.0) * (4.5 / 25
 vec4 wc4(vec4 c) { return vec4(wcDecode(c.r), wcDecode(c.g), wcDecode(c.b), wcDecode(c.a)); }
 vec3 boxUVW(vec3 p) { return vec3((p.xy + BOX_HALF) / BOX, p.z / ZTOP); }
 vec2 windAt(float z) { return texture(u_wind, vec2(clamp(z / ZTOP, 0.0, 1.0), 0.5)).rg; }
-float edgeFade(vec2 xy) { vec2 e = abs(xy) - (BOX_HALF - 1.5); return 1.0 - smoothstep(0.0, 24.0, max(e.x, e.y)); }
+float edgeFade(vec2 xy) { vec2 e = abs(xy) - (BOX_HALF - 1.5); float o = max(e.x, e.y); return (1.0 - 0.45 * smoothstep(0.0, 60.0, o)) * (1.0 - smoothstep(150.0, 210.0, o)); }
 
 // A slow, large-scale warp of where the weather is read: it hides the model's 3 km grid in organic
 // shapes (sub-grid, so heights and amounts stay where the model put them).
@@ -139,7 +139,8 @@ vec3 warpOf(vec3 p) {
   vec2 w = windAt(p.z) * (u_time * 0.001);
   vec3 n = textureLod(u_noise, vec3((p.xy - w) / 29.0, p.z / 9.0) + vec3(0.37, 0.11, 0.73), 0.0).rgb;
   vec3 m = textureLod(u_noise, vec3((p.xy - w) / 11.0, p.z / 5.0) + vec3(0.71, 0.53, 0.19), 0.0).gba;
-  return (n - vec3(0.55, 0.45, 0.45)) * vec3(2.6, 2.6, 0.35) + (m - 0.4) * vec3(0.9, 0.9, 0.18);
+  vec3 f = textureLod(u_noise, vec3((p.xy - w) / 3.7, p.z / 2.2) + vec3(0.29, 0.83, 0.47), 0.0).gba;
+  return (n - vec3(0.55, 0.45, 0.45)) * vec3(2.6, 2.6, 0.35) + (m - 0.4) * vec3(1.5, 1.5, 0.2) + (f - 0.4) * vec3(1.0, 1.0, 0.12);
 }
 
 void weather(vec3 p, out vec4 aux, out vec4 water) {
@@ -179,7 +180,7 @@ float cloudDensity(vec3 p, vec4 aux, vec4 water, float lod, out float h) {
     vec2 wd = normalize(windAt(p.z) + vec2(1e-3, 0.0));
     vec2 r = vec2(dot(q.xy, wd), dot(q.xy, vec2(-wd.y, wd.x)));
     r.x += (top - p.z) * 3.0;
-    nq = vec3(r.x / 13.0, r.y / 2.4, q.z / 1.4);
+    nq = vec3(r.x / 8.0, r.y / 1.1, q.z / 0.9);
   } else {
     float tile = mix(mix(5.5, 4.0, iceF), clamp(thick * 2.3, 2.2, 13.0), cum);
     nq = q / tile;
@@ -188,7 +189,12 @@ float cloudDensity(vec3 p, vec4 aux, vec4 water, float lod, out float h) {
   vec4 n = textureLod(u_noise, nq, 0.0);
   float wf = n.g;
   float shape = remap(n.r, wf - 1.0, 1.0, 0.0, 1.0);
-  shape = mix(0.62 + 0.38 * shape, shape, cum);
+  // towering cumulus: cauliflower lobes a few km across (the tile's coarse cells), so a model cell's
+  // edge becomes a wall of bulging turrets instead of a sheer face
+  float big = cum * sat((thick - 2.0) / 3.5);
+  shape = mix(shape, shape * 0.45 + (n.a * 0.62 + n.g * 0.38) * 0.68, big);
+  // sheets are smooth inside but ragged where their coverage runs out
+  shape = mix(0.62 + 0.38 * shape, shape, max(cum, 1.0 - smoothstep(0.5, 0.95, cov)));
   // far away the shape's own detail is below a pixel: let it settle toward its average
   shape = mix(shape, 0.55, smoothstep(0.35, 1.6, gFoot) * 0.7);
   float strat = smoothstep(0.0, 0.22, h) * (1.0 - smoothstep(0.62, 1.0, h));
@@ -224,9 +230,11 @@ float mammatusDensity(vec3 p) {
   vec2 w = windAt(base) * (u_time * 0.001);
   vec3 q = vec3((p.xy - w) / 7.0, 0.31 + u_time * 0.000015);
   float c = textureLod(u_noise, q, 0.0).a;              // single-octave cells, about 1.7 km
-  float depth = s * 1.15 * smoothstep(0.3, 0.92, c);
+  // round pouches: a hemisphere over each cell (the cell value falls off linearly with distance)
+  float r = sat((1.0 - c) / 0.62);
+  float depth = s * 1.05 * sqrt(max(0.0, 1.0 - r * r));
   float lobe = sat((depth - below) / max(depth, 0.05));
-  return smoothstep(0.0, 0.3, lobe) * edgeFade(p.xy);
+  return smoothstep(0.0, 0.18, lobe) * edgeFade(p.xy);
 }
 
 // falling rain and snow: curtains streaked downward
@@ -241,8 +249,9 @@ float precipStreak(vec3 p, float snow) {
 }
 
 // extinction (per km) of cloud water with this density: optical properties of droplets vs crystals
+// droplets (about 10 um) are far more opaque per gram than ice crystals and snow aloft (about 60 um)
 float cloudSigma(float d, vec4 water) {
-  return d * max(150.0 * water.r + 41.0 * water.g, 1.5) * u_ext;
+  return d * max(150.0 * water.r + 26.0 * water.g, 1.2) * u_ext;
 }
 `;
 
@@ -314,7 +323,7 @@ void main() {
     L += T * (S - S * Tr) / ext;
     T *= Tr;
   }
-  o = vec4(L * 9.0, 1.0);
+  o = vec4(L * 5.0, 1.0);
 }`;
 
 // ------------------------------------------------------------------ cloud shadows on the ground (sun's eye view, top-down)
@@ -340,7 +349,7 @@ void main() {
   float j = ign(gl_FragCoord.xy, 0.0);
   for (int i = 0; i < N; i++) {
     vec3 q = p + L * dt * (float(i) + j);
-    if (abs(q.x) > BOX_HALF + 24.0 || abs(q.y) > BOX_HALF + 24.0) break;
+    if (abs(q.x) > BOX_HALF + 200.0 || abs(q.y) > BOX_HALF + 200.0) break;
     vec4 aux, water; float h;
     weather(q, aux, water);
     float d = cloudDensity(q, aux, water, 1.0, h);
@@ -433,9 +442,9 @@ vec3 atmosphereRamp(vec3 rd, float z) {
                     vec3(0.024, 0.022, 0.23), vec3(0.009, 0.004, 0.08), vec3(0.001, 0.0005, 0.003));
   vec3 twi = ramp7(z, vec3(0.13, 0.10, 0.21), vec3(0.11, 0.09, 0.24), vec3(0.06, 0.06, 0.20), vec3(0.03, 0.035, 0.14),
                    vec3(0.012, 0.012, 0.07), vec3(0.006, 0.004, 0.035), vec3(0.001, 0.0008, 0.004));
-  vec3 nite = ramp7(z, vec3(0.013, 0.017, 0.032), vec3(0.010, 0.013, 0.028), vec3(0.008, 0.010, 0.024), vec3(0.006, 0.007, 0.018),
+  vec3 nite = 0.32 * ramp7(z, vec3(0.013, 0.017, 0.032), vec3(0.010, 0.013, 0.028), vec3(0.008, 0.010, 0.024), vec3(0.006, 0.007, 0.018),
                     vec3(0.004, 0.004, 0.012), vec3(0.002, 0.002, 0.007), vec3(0.0005, 0.0005, 0.0018));
-  nite *= 1.0 + 2.5 * u_moonIllum * smoothstep(-2.0, 15.0, degrees(asin(clamp(u_moonDir.z, -1.0, 1.0))));
+  nite *= 1.0 + 1.1 * u_moonIllum * smoothstep(-2.0, 15.0, degrees(asin(clamp(u_moonDir.z, -1.0, 1.0))));
   // toward the sun warmer and brighter, away cooler
   vec2 a = normalize(rd.xy + 1e-6), b = normalize(u_sunDir.xy + 1e-6);
   float toward = 0.5 + 0.5 * dot(a, b);
@@ -494,6 +503,11 @@ vec3 discs(vec3 rd) {
     float maria = 0.75 + 0.25 * smoothstep(0.35, 0.65, fbm2(uv * 2.2 + 4.0, 4));
     float edge = smoothstep(1.0, 0.94, rm);
     col += u_moonCol * (lit * maria * 9.0 + 0.012) * edge;
+  }
+  // the moon's aureole in the air around it
+  if (u_moonDir.z > -0.05) {
+    float rr = max(rm - 1.0, 0.0);
+    col += u_moonCol * u_moonIllum * u_night * (0.05 * exp(-rr / 2.5) + 0.012 * exp(-rr / 18.0) + 0.003 * exp(-rr / 70.0));
   }
   return col;
 }
@@ -565,8 +579,10 @@ void main() {
     vec3 amb = mix(u_ambBot, u_ambTop, 0.5 + 0.5 * n.z) * 0.9;
     col = alb * (Ls + amb);
     // city lights at night
-    vec3 lights = pow(texture(u_nightTex, tuv).rgb, vec3(2.2)) * (0.6 + 0.8 * fbm2(p.xy * 6.0, 3));
-    col += lights * u_night * 0.25;
+    // city lights at night: warm points scattered through the lit area, not a glowing sheet
+    float lit = pow(texture(u_nightTex, tuv).r, 2.2);
+    float pts = smoothstep(0.58, 0.82, fbm2(p.xy * 9.0, 3)) * (0.4 + 0.6 * smoothstep(0.3, 0.7, fbm2(p.xy * 1.3 + 7.0, 2)));
+    col += vec3(1.0, 0.62, 0.32) * lit * (0.004 + 0.12 * pts) * u_night;
     depth = tHit;
   } else {
     col = skyColor(rd) + discs(rd);
@@ -604,6 +620,7 @@ vec3 starColor(float t) {
 void main() {
   vec3 d = u_eq * a_dir;
   gl_Position = u_vp * vec4(u_camPos + d * 3000.0, 1.0);
+  gl_Position.z = gl_Position.w * 0.99999;   // on the far plane, never clipped by it
   float m = a_mt.x;
   // twinkle-free, but fainter stars drown in haze near the horizon
   float ext = exp(-0.25 / max(d.z + 0.03, 0.03));
@@ -644,6 +661,8 @@ uniform int u_nbands;
 uniform int u_maxSteps;
 uniform float u_far;
 uniform vec3 u_cityCol;          // light from below at night (city lights on cloud bases)
+uniform vec4 u_flash[2];         // lightning inside the cloud: xyz (km), w intensity
+uniform vec3 u_flashCol;
 layout(location = 0) out vec4 o;
 layout(location = 1) out vec4 oEx;
 
@@ -689,8 +708,8 @@ void main() {
     }
     else if (num > 0.0) tFar = -1.0;
   }
-  // the cloud box (with the fade margin)
-  float M = BOX_HALF + 24.0;
+  // the cloud box (and the edge values carried on toward the horizon)
+  float M = BOX_HALF + 200.0;
   vec3 inv = 1.0 / (rd + vec3(1e-7));
   vec3 t0 = (vec3(-M, -M, 0.0) - ro) * inv, t1 = (vec3(M, M, ZTOP) - ro) * inv;
   vec3 tmin = min(t0, t1), tmax = max(t0, t1);
@@ -714,13 +733,19 @@ void main() {
       else { float ta = (band.x - ro.z) / rd.z, tb = (band.y - ro.z) / rd.z; a = max(tNear, min(ta, tb)); c = min(tFar, max(ta, tb)); }
       if (c <= a) continue;
       float len = c - a;
-      float tm = 0.5 * (a + c) - t0m;
-      int n = int(clamp(ceil(len / (0.06 + 0.012 * tm)), 3.0, float(budget)));
+      // steps grow geometrically with distance from where the march starts (0.06 km + 1.2% of the
+      // distance): near cloud gets fine steps however long the ray is, and when the step budget runs
+      // short every step stretches by the same factor instead of the near ones going coarse
+      float A = 0.06 / 0.012 + (a - t0m);
+      float Nf = log((A + len) / A) / 0.012;
+      int n = int(clamp(ceil(Nf), 3.0, float(budget)));
       budget -= n;
-      float dt = len / float(n);
+      float km = 0.012 * Nf / float(n);
       for (int i = 0; i < 200; i++) {
         if (i >= n || T < 0.01) break;
-        float t = a + dt * (float(i) + jit);
+        float e0 = exp(km * float(i));
+        float dt = A * e0 * (exp(km) - 1.0);
+        float t = a + A * (e0 * exp(km * jit) - 1.0);
         vec3 p = ro + rd * t;
         gFoot = max(t * u_pixAngle, 0.01);
         vec4 aux, water; float h;
@@ -730,8 +755,16 @@ void main() {
         float d = cloudDensity(p, aux, water, 0.0, h);
         float dm = mammatusDensity(p);
         float sc = cloudSigma(d, water) + dm * 16.0 * u_ext;
-        float sr = water.b * 0.9 * (0.25 + 1.5 * precipStreak(p, 0.0));
-        float ss = water.a * 9.0 * (0.3 + 1.1 * precipStreak(p, 1.0));
+        // precipitation edges: the model's amounts fade over a 3 km cell, which would leave a shaft with
+        // straight walls; noise in the (logarithmic) amount makes the curtains' edges ragged
+        float pe = 1.0;
+        if (water.b + water.a > 1e-4) {
+          vec2 pw = windAt(p.z) * (u_time * 0.001);
+          float rn = textureLod(u_noise, vec3((p.xy - pw) / 7.0, p.z / 9.0) + vec3(0.13, 0.57, 0.91), 0.0).r;
+          pe = exp2(min((rn - 0.5) * 8.0, 0.7));
+        }
+        float sr = water.b * pe * 0.9 * (0.25 + 1.5 * precipStreak(p, 0.0));
+        float ss = water.a * pe * 9.0 * (0.3 + 1.1 * precipStreak(p, 1.0));
         float se = (sc + sr + ss) * cutF;
         if (se < 1e-4) continue;
         gFoot = max(t * u_pixAngle, 0.01);
@@ -741,12 +774,27 @@ void main() {
         // around inside the cloud), so shadowed sides stay luminous the way real cumulus do
         float sun = ph[0] * exp(-tau) + 0.6 * ph[1] * exp(-tau * 0.25) + 0.42 * ph[2] * exp(-tau * 0.07) + 0.3 * ph[3] * exp(-tau * 0.018);
         // deep inside thick cloud the light is fully diffused: a glow that brightens toward the sunlit top
-        sun += 0.055 * (0.3 + 0.7 * h) * exp(-tau * 0.004) * (1.0 - sat(water.b * 2.0));
+        sun += 0.055 * (0.3 + 0.7 * h) * exp(-tau * 0.02) * (1.0 - 0.6 * sat(water.b));
+        // the light march only looks a few km toward the light; under a towering storm the rest of the
+        // column above still has to be crossed, so its base and shadowed flanks go dark and ominous
+        float column = max(aux.a * ZTOP - p.z, 0.0) / max(u_light.z, 0.3);
+        sun *= mix(1.0, exp(-max(column - 3.0, 0.0) * 0.16), smoothstep(6.0, 40.0, tau));
         float powder = 1.0 - 0.45 * exp(-se * 0.3);
         float hh = dm > d ? 0.12 : max(h, sat(p.z / 3.0) * step(d, 0.0));
         vec3 amb = mix(u_ambBot, u_ambTop, smoothstep(0.0, 1.0, hh)) * (0.6 + 0.4 * hh);
+        // under and inside a deep, wide cloud the sky dome is hidden by the cloud itself
+        float above = max(aux.a * ZTOP - max(p.z, aux.b * ZTOP), 0.0);
+        amb *= 1.0 - 0.85 * smoothstep(0.2, 0.8, aux.r) * (1.0 - exp(-above * 0.35));
         amb += u_cityCol * exp(-max(p.z - aux.b * ZTOP, 0.0) * 2.2) * (1.0 - hh);
-        vec3 S = (sc * 0.995 + sr * 0.55 + ss * 0.85) * cutF * (Lc * sun * powder * 10.0 + amb * 0.62);
+        // lightning: a point of light deep in the cloud, diffused by the droplets around it, so the flash
+        // blooms through the cloud's own structure
+        float fl = 0.0;
+        for (int k = 0; k < 2; k++) {
+          if (u_flash[k].w < 0.001) continue;
+          float fd = length(p - u_flash[k].xyz);
+          fl += u_flash[k].w * exp(-fd * 0.12) / (1.0 + fd * fd * 0.012);
+        }
+        vec3 S = (sc * 0.995 + sr * 0.55 + ss * 0.85) * cutF * (Lc * sun * powder * 10.0 + amb * 0.62 + u_flashCol * fl * 0.1);
         float Tr = exp(-se * dt);
         L += T * (S - S * Tr) / se;
         // what the halo and the rainbow need: thin, sunlit ice and rain on this ray
@@ -894,7 +942,7 @@ void main() {
     float dogAz = radians(22.0) / max(cos(el), 0.3);
     float dE = degrees(re - el), dA = degrees(daz - dogAz);
     vec3 dogs = exp(-vec3(dA - 0.35, dA, dA + 0.35) * vec3(dA - 0.35, dA, dA + 0.35) / 0.35 - dE * dE / 1.2) * smoothstep(45.0, 20.0, degrees(el)) * 1.6;
-    col += lightColor(10.0) * (h + dogs - inner) * halo * 0.35;
+    col += lightColor(10.0) * (h + dogs - inner) * halo * 1.6;
   }
   float bow = min(ex.b, 1.0);
   if (bow > 0.002 && u_light.z > -0.02) {
@@ -909,15 +957,13 @@ void main() {
   for (int i = 0; i < 2; i++) {
     vec4 f = u_flash[i];
     if (f.w < 0.001) continue;
-    vec3 pc = u_camPos + rd * min(ex.r, 200.0);
-    float d2 = dot(pc - f.xyz, pc - f.xyz);
-    float glow = exp(-d2 / 14.0) * (1.0 - T) * 1.4 + exp(-d2 / 60.0) * (1.0 - T) * 0.35;
-    // the ray passing close by, in the air or in rain
+    // (the cloud itself is lit in the cloud pass) the ray passing close by, through air and rain, and the
+    // whole sky brightening a touch
     vec3 toF = f.xyz - u_camPos;
     float tc = max(dot(toF, rd), 0.0);
     float miss = length(toF - rd * tc);
-    float air = exp(-miss * miss / 3.0) * 0.06 + 0.012;
-    col += u_flashCol * f.w * (glow + air);
+    float air = (exp(-miss * miss / 4.0) * 0.010 + exp(-miss / 6.0) * 0.0015) * T;
+    col += u_flashCol * f.w * air;
   }
 
   col *= u_exposure;

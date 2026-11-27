@@ -694,11 +694,13 @@ class App {
     const hp = params || hashParams();
     // a link that picks the view wins over the first-visit fly-in, which is still on a timer at startup
     if (["point", "alert", "ll", "sky"].some((k) => hp.has(k))) this.introFly = false;
-    if (hp.get("sky") && !this.sky.isOpen) {
+    if (hp.get("sky")) {
       const [lat, lon] = hp.get("sky").split(",").map(Number);
-      if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 89 && Math.abs(lon) <= 180) {
+      const same = this.sky.isOpen && this.sky.p && Math.abs(this.sky.p.lat - lat) < 1e-3 && Math.abs(this.sky.p.lon - lon) < 1e-3;
+      if (!same && Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 89 && Math.abs(lon) <= 180) {
         const saved = this.savedPoint({ lat, lon });
-        setTimeout(() => this.openSky(saved ? { ...saved } : { lat, lon }), 300);
+        const p = saved ? { ...saved } : { lat, lon, name: this.nearestCity(lat, lon, 25)?.name || null };
+        if (this.sky.isOpen) { this.selected = p; this.sky.setPoint(p); } else setTimeout(() => this.openSky(p), 300);
       }
       return;
     }

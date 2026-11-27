@@ -72,7 +72,8 @@ export function hashParams() {
 export function setHash(params, replace = true) {
   const s = new URLSearchParams(params).toString();
   const url = `${location.pathname}${location.search}${s ? "#" + s : ""}`;
-  if (replace) history.replaceState(null, "", url); else history.pushState(null, "", url);
+  // keep the entry's state (the Sky view marks its own entry so the back gesture can close it)
+  if (replace) history.replaceState(history.state, "", url); else history.pushState(null, "", url);
 }
 
 export function haversineKm(lat1, lon1, lat2, lon2) {
