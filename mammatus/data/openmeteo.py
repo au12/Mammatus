@@ -25,6 +25,10 @@ METEOGRAM_VARS = [
 LEVELS = [1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 725, 700, 650, 600, 550,
           500, 450, 400, 350, 300, 250, 200, 150, 100]
 LEVEL_VARS = ["temperature", "dew_point", "relative_humidity", "wind_speed", "wind_direction", "geopotential_height"]
+SKY_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150, 100]
+SKY_LEVEL_VARS = ["cloud_cover", "temperature", "geopotential_height", "wind_speed", "wind_direction"]
+SKY_SURFACE_VARS = ["temperature_2m", "dew_point_2m", "surface_pressure", "cape", "cloud_cover", "cloud_cover_low",
+                    "cloud_cover_mid", "cloud_cover_high", "rain", "showers", "snowfall", "visibility"]
 SURFACE_VARS = ["temperature_2m", "dew_point_2m", "surface_pressure", "wind_speed_10m",
                 "wind_direction_10m", "cape", "convective_inhibition", "freezing_level_height"]
 
@@ -110,6 +114,31 @@ class OpenMeteo:
             "lat": data.get("latitude"), "lon": data.get("longitude"), "elevation": data.get("elevation"),
             "model": model, "time": h.get("time", []), "levels": levels,
             "surface": {v: col(v) for v in SURFACE_VARS},
+        }
+
+    async def sky(self, lat: float, lon: float, model: str, days: int = 7) -> dict:
+        """Cloud cover, temperature and wind by height for the Sky view fallback.
+
+        Open-Meteo derives pressure-level cloud cover from relative humidity, so this is an
+        estimate of where cloud is, not the model's own cloud water.
+        """
+        hourly = [f"{v}_{p}hPa" for v in SKY_LEVEL_VARS for p in SKY_LEVELS] + SKY_SURFACE_VARS
+        params = {
+            "latitude": f"{lat:.3f}", "longitude": f"{lon:.3f}", "hourly": ",".join(hourly),
+            "models": model, "timeformat": "unixtime", "timezone": "GMT",
+            "forecast_days": str(days), "past_hours": "6", "wind_speed_unit": "ms",
+        }
+        data = await self._get("/v1/forecast", params, ttl=1800)
+        h = data.get("hourly") or {}
+
+        def col(name: str) -> list:
+            return h.get(name) or h.get(f"{name}_{model}") or []
+
+        return {
+            "lat": data.get("latitude"), "lon": data.get("longitude"), "elevation": data.get("elevation"),
+            "model": model, "time": h.get("time", []), "plevels": [str(p) for p in SKY_LEVELS],
+            "levels": {str(p): {v: col(f"{v}_{p}hPa") for v in SKY_LEVEL_VARS} for p in SKY_LEVELS},
+            "surface": {v: col(v) for v in SKY_SURFACE_VARS},
         }
 
     async def minutely(self, lat: float, lon: float) -> dict:

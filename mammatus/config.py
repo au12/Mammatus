@@ -70,6 +70,7 @@ class Settings:
     cookie_secure: str = "auto"  # auto | true | false
     session_days: int = 30
     cache_gb: float = 10.0
+    sky_cache_gb: float = 2.0
     retention_hours: int = 54
     models: tuple[str, ...] = ALL_MODELS
     openmeteo_url: str = "https://api.open-meteo.com"
@@ -145,6 +146,7 @@ def load_settings() -> Settings:
         cookie_secure=(_env("MAMMATUS_SECURE_COOKIES", "auto") or "auto").lower(),
         session_days=max(1, _int("MAMMATUS_SESSION_DAYS", 30)),
         cache_gb=max(0.5, _float("MAMMATUS_CACHE_GB", 10.0)),
+        sky_cache_gb=max(0.2, _float("MAMMATUS_SKY_CACHE_GB", 2.0)),
         retention_hours=max(12, _int("MAMMATUS_RETENTION_HOURS", 54)),
         models=models,
         openmeteo_url=(_env("MAMMATUS_OPENMETEO_URL", "https://api.open-meteo.com") or "").rstrip("/"),

@@ -25,6 +25,7 @@ from .data.catalog import (
 )
 from .data.derive import NotAvailable
 from .data.http import FetchError
+from .data import sky as SKY
 from .data.models import REGISTRY
 from .data.openmeteo import RateLimited
 from .data.satellite import ATTRIBUTION as SAT_ATTRIBUTION, PRODUCTS as SAT_PRODUCTS
@@ -86,6 +87,8 @@ def catalog(request: Request, user: CurrentUser = Depends(require_user)):
         "satellite": [{"id": k, **v} for k, v in SAT_PRODUCTS.items()],
         "satAttribution": SAT_ATTRIBUTION,
         "metrics": {k: {"label": v["label"], "unit": v["unit"], "agg": v["agg"]} for k, v in METRICS.items()},
+        "sky": {"models": [m for m in ("hrrr", "rrfs", "gfs") if m in enabled],
+                "estimated": [{"id": k, "name": v} for k, v in SKY.ESTIMATED_MODELS.items()]},
         "tz": settings.display_tz,
         "vapid": s.vapid.public_b64,
     }
@@ -308,6 +311,59 @@ def sample_grid(arr, grid, lat: float, lon: float) -> float | None:
             v = float(arr[jj, ii])
             return v if np.isfinite(v) else None
     return None
+
+
+# --------------------------------------------------------------------------- sky view
+
+def _sky_response(blob: bytes, max_age: int) -> Response:
+    return Response(blob, media_type="application/octet-stream",
+                    headers={"Content-Encoding": "gzip", "Cache-Control": f"private, max-age={max_age}", "Vary": "Cookie"})
+
+
+@router.get("/sky/frame/{model}/{run}/{fhr}")
+async def sky_frame(model: str, run: str, fhr: int, request: Request,
+                    lat: float = Query(..., ge=-89, le=89), lon: float = Query(..., ge=-180, le=180),
+                    detail: int = Query(1, ge=0, le=1), user: CurrentUser = Depends(require_user)):
+    """The box of atmosphere above a point for one model hour (cloud water, layers, wind, terrain)."""
+    s = svc(request)
+    if model not in SKY.SKY_MODELS or model not in s.models_enabled:
+        raise HTTPException(404, "No sky data from this model")
+    if not re.fullmatch(r"\d{10}", run) or not (0 <= fhr <= 400):
+        raise HTTPException(400, "Bad request")
+    steps = s.runs.steps(model, run)
+    if not steps:
+        raise HTTPException(404, "Run not available")
+    if fhr not in steps:
+        raise HTTPException(404, "Forecast hour not published yet")
+    try:
+        blob = await s.sky.frame(model, run, fhr, lat, lon, detail)
+    except (NotAvailable, FetchError) as exc:
+        raise _upstream_error(exc)
+    return _sky_response(blob, 3600)
+
+
+@router.get("/sky/estimated")
+async def sky_estimated(request: Request, lat: float = Query(..., ge=-89, le=89), lon: float = Query(..., ge=-180, le=180),
+                        t: float = Query(..., ge=0, le=4e9), model: str = "ecmwf_ifs025",
+                        user: CurrentUser = Depends(require_user)):
+    """The same box estimated from humidity-derived cloud cover (Open-Meteo), for models without cloud water."""
+    if model not in SKY.ESTIMATED_MODELS:
+        raise HTTPException(400, "Unknown model")
+    try:
+        blob = await svc(request).sky.estimated(model, t, lat, lon)
+    except (NotAvailable, FetchError) as exc:
+        raise _upstream_error(exc)
+    return _sky_response(blob, 900)
+
+
+@router.get("/sky/observed")
+async def sky_observed(request: Request, lat: float = Query(..., ge=-89, le=89), lon: float = Query(..., ge=-180, le=180),
+                       user: CurrentUser = Depends(require_user)):
+    """Cloud bases measured at the nearest airports, to check the model against."""
+    try:
+        return {"stations": await svc(request).sky.observed(lat, lon)}
+    except FetchError as exc:
+        raise _upstream_error(exc)
 
 
 @router.get("/geocode")
@@ -673,6 +729,7 @@ def admin_system(request: Request, admin: CurrentUser = Depends(require_admin)):
         "cache": {"bytes": s.frames.cache.total, "cap": s.frames.cache.cap},
         "disk": {"total": usage.total, "free": usage.free} if usage else None,
         "stats": s.frames.stats,
+        "sky": s.sky.stats,
         "openMeteoCalls": s.om.calls,
         "openMeteoUrl": s.om.base,
         "runs": {m: {"latest": (s.runs.latest(m).run if s.runs.latest(m) else None),
@@ -689,6 +746,7 @@ def admin_cache_clear(request: Request, admin: CurrentUser = Depends(require_adm
     root = s.frames.cache.root
     for sub in ("frames", "radar", "sat"):
         shutil.rmtree(root / sub, ignore_errors=True)
+    s.sky.clear()
     s.frames.cache.scan()
     get_db().audit("cache_cleared", user_id=admin.id, ip=request.state.client_ip)
     return {"ok": True}

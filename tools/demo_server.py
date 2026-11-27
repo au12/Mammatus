@@ -529,6 +529,52 @@ def patch() -> None:
         return [{"name": f"{name.title()} (demo)", "admin1": "Demo", "country": "US", "lat": 35.6, "lon": -82.55,
                  "elevation": 650.0, "population": 95000}]
 
+    # ---- sky view: a made-up sky of each kind. The scene follows the place (one per 1.5-degree tile) and
+    # drifts with the forecast hour; MAMMATUS_DEMO_SKY (or the file <data dir>/sky_scene) picks one.
+    from mammatus.data import sky as SK
+
+    def scene_for(lat, lon):
+        override = os.environ.get("MAMMATUS_DEMO_SKY")
+        try:
+            override = (Path(os.environ.get("MAMMATUS_DATA_DIR", "/tmp/mammatus-demo")) / "sky_scene").read_text().strip() or override
+        except OSError:
+            pass
+        if override in SK.SCENES:
+            return override
+        return SK.SCENES[int(abs(math.floor(lat / 1.5) * 7 + math.floor(lon / 1.5) * 3)) % len(SK.SCENES)]
+
+    async def sky_frame(self, model_id, run, fhr, lat, lon, detail=1):
+        scene = scene_for(lat, lon)
+        valid = F.parse_run(run) + timedelta(hours=fhr)
+        drift = hours_at(valid.timestamp())
+        model = REGISTRY[model_id]
+        header = {"model": model_id, "source": model.short, "attribution": model.attribution, "run": run, "fhr": fhr,
+                  "valid": valid.strftime("%Y-%m-%dT%H:%M:%SZ"), "estimated": False, "detail": detail,
+                  "lat": round(lat, 3), "lon": round(lon, 3), "demo": scene}
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(0.15 if detail == 0 else 0.5)
+        return await loop.run_in_executor(None, lambda: SK.pack(SK.synth_box(scene, drift, lat), header))
+
+    async def sky_estimated(self, om_model, when, lat, lon):
+        scene = scene_for(lat, lon)
+        header = {"model": om_model, "source": SK.ESTIMATED_MODELS.get(om_model, om_model), "attribution": "Open-Meteo (CC BY 4.0)",
+                  "run": None, "fhr": None, "valid": time.strftime("%Y-%m-%dT%H:00:00Z", time.gmtime(when)),
+                  "estimated": True, "detail": 1, "lat": round(lat, 3), "lon": round(lon, 3), "demo": scene}
+        return SK.pack(SK.synth_box(scene, hours_at(when), lat), header)
+
+    async def sky_observed(self, lat, lon):
+        scene = scene_for(lat, lon)
+        layers = {"fair": [("FEW", 4200)], "towers": [("SCT", 3700)], "storm": [("SCT", 3300), ("BKN", 9000)],
+                  "cirro": [("SCT", 13500)], "stratus": [("OVC", 1100)], "front": [("BKN", 1500), ("OVC", 4000)],
+                  "decks": [("BKN", 5000), ("BKN", 13000)], "snow": [("OVC", 1500)], "fog": [("VV", 100)]}.get(scene, [])
+        return [{"id": "KDEM", "name": "Demo Regional", "km": 14.2, "time": int(time.time()) - 900, "sky": layers[-1][0] if layers else "CLR",
+                 "layers": [{"cover": c, "frac": SK._OKTAS[c], "base": round(b * 0.3048)} for c, b in layers],
+                 "elev": 250, "raw": "METAR KDEM (demo data)"}]
+
+    SK.SkyService.frame = sky_frame
+    SK.SkyService.estimated = sky_estimated
+    SK.SkyService.observed = sky_observed
+
     OM.OpenMeteo.meteogram = om_meteogram
     OM.OpenMeteo.sounding = om_sounding
     OM.OpenMeteo.elevation = om_elevation

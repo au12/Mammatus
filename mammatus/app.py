@@ -39,6 +39,7 @@ from .data.runs import RunsService
 from .data.satellite import SatelliteService
 from .data.lightning import LightningService
 from .data.fronts import FrontsService
+from .data.sky import SkyService
 from .db import get_db
 from .events import EventHub
 from .security import RateLimiter, client_ip, request_host, request_scheme
@@ -182,6 +183,7 @@ async def _cleanup_loop(svc) -> None:
                     protected.add(svc.frames.frames_root / mid / r.run)
             loop = asyncio.get_running_loop()
             removed = await loop.run_in_executor(None, svc.frames.cache.cleanup, protected, settings.retention_hours)
+            removed += await loop.run_in_executor(None, svc.sky.cleanup)
             if removed:
                 log.info("cache cleanup freed %.1f MB", removed / 1e6)
         except Exception:
@@ -218,7 +220,7 @@ async def lifespan(app: FastAPI):
         sat=SatelliteService(frames.cache, frames.pool), nws=nws, om=om, vapid=vapid, events=events,
         notifier=notifier, engine=engine, started=time.time(), models_enabled=set(m.id for m in runs.models),
         lightning=LightningService(settings.cache_dir, frames.pool, settings.lightning, settings.lightning_backfill_min),
-        fronts=FrontsService(),
+        fronts=FrontsService(), sky=SkyService(frames, runs, om, settings.cache_dir, int(settings.sky_cache_gb * 1024**3)),
     )
     app.state.svc = svc
     background = os.environ.get("MAMMATUS_BACKGROUND", "1") != "0"  # tests turn polling off
