@@ -295,7 +295,9 @@ async function system(app, p, ctx) {
   const hrs = (sec) => (sec > 86400 ? `${(sec / 86400).toFixed(1)} days` : `${(sec / 3600).toFixed(1)} h`);
   const rows = [
     ["Version", s.version], ["Uptime", hrs(s.uptime)], ["Users", s.users], ["Live connections", s.listeners],
-    ["Frame cache", `${fmtBytes(s.cache.bytes)} of ${fmtBytes(s.cache.cap)}`], ["Disk free", s.disk ? `${fmtBytes(s.disk.free)} of ${fmtBytes(s.disk.total)}` : "—"],
+    ["Frame cache", `${fmtBytes(s.cache.bytes)} of ${fmtBytes(s.cache.cap)}`],
+    ["Terrain", !s.terrain ? "—" : s.terrain.enabled ? `${fmtBytes(s.terrain.bytes)} of ${fmtBytes(s.terrain.cap)} cached` : "off (MAMMATUS_TERRAIN_URL)"],
+    ["Disk free", s.disk ? `${fmtBytes(s.disk.free)} of ${fmtBytes(s.disk.total)}` : "—"],
     ["Public URL", s.publicUrl || "not set (invite links use the request host)"], ["Open-Meteo", `${s.openMeteoUrl} · ${s.openMeteoCalls} calls`],
   ];
   p.append(h("h4", {}, "Server"), h("table", { class: "t" }, ...rows.map(([k, v]) => h("tr", {}, h("td", { class: "note" }, k), h("td", {}, String(v))))));

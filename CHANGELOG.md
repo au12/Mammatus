@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.2.0 — 2026-11-27
+
+### Real terrain in the Sky view
+- **The ground is the real ground.** The Sky view now draws surveyed terrain for 250 km around the point
+  instead of the weather model's 3 km terrain and made-up hills: the cut of the side view shows the true
+  profile of the land, real ranges stand behind it in layers of haze, ridges poke through a low cloud
+  deck like islands, and from the ground the skyline is the one outside your window. The title shows
+  the surveyed elevation of the point.
+- **Free, open data, fetched by the server.** Elevation comes from Terrain Tiles on AWS Open Data
+  (Mapzen/Tilezen: USGS 3DEP, SRTM, GMTED2010, ETOPO1 and national surveys): no key, no account, and
+  the browser never talks to anyone but your server. The first visit to a place downloads about 75
+  tiles (7 MB, a couple of seconds); the finished patch (1.8 MB, or 0.6 MB for phones) is then cached
+  for good, as are the tiles, which neighbouring places share. `MAMMATUS_TERRAIN_CACHE_GB` caps the
+  cache (default 1); `MAMMATUS_TERRAIN_URL` points at any other Terrarium tile server (Mapterhorn
+  works, see the README) or turns terrain `off`.
+- **Bad data mended.** The tiles' coarse zooms have false needles and pits (a kilometre-high spike on the
+  plain near Boulder, a dozen or more around most US places). Each lone spike in the middle grid is
+  checked against a finer zoom and replaced only when that zoom shows level ground, so real pinnacles
+  and summits are untouched.
+- **Three nested grids.** ±16 km at 31 m, ±64 km at 125 m and ±256 km at 500 m, blended at their rims
+  so they meet without a seam: fine ground underfoot, whole ranges on the horizon, in 17 MB of GPU memory
+  (4 MB on a phone, which gets grids of half the size).
+- **Faster than the noise it replaces.** Each grid's mips carry the highest ground of every block, so a
+  ray strides over country it clears and only tests the surface where it might touch: about 11 steps a
+  pixel instead of up to 96 steps of procedural noise for every pixel, sky included. Whole frames
+  measured in software rendering (SwiftShader, 1280×800, clear sky): the true-scale side view about 3×
+  faster and the views from the ground 1.5–2.3× faster; the pulled-back view, where every pixel is now
+  detailed, shadowed ground, about 1.5× slower.
+- **The earth curves.** From the ground, distant country drops behind the horizon as it should (a range
+  200 km away stands 2.7 km lower). The side view is a diagram at true scale, so there the ground stays
+  level and the altitude ruler stays exact.
+- **Lit like land.** Slopes are shaded from the real surface, ridges throw long soft shadows when the sun
+  is low, valleys see less of the sky than crests, steep ground shows rock, and the sea is level water:
+  dark from above, mirroring the sky toward the horizon, with the sun's glitter.
+- **Honest air.** How far you can see along the ground now follows the model's humidity there: about
+  180 km in dry air, 60 km at 70 %, under 20 km near saturation.
+- **Smooth edges.** The skyline is anti-aliased, and clouds (drawn at reduced resolution) are fitted to
+  the ground's outline when they are scaled up, so a ridge in front of a cloud deck has a clean edge.
+- **Arrives gracefully.** The view opens on level ground and the land rises into place when its terrain
+  is in (at once for places seen before); moving to another point sinks one landscape and raises the
+  next. If the tiles can't be reached, the model's own terrain stands in as before.
+- Fixed stray light pixels along the screen's diagonal in the Sky view's ground (the ground texture was
+  read with undefined derivatives).
+- Settings → System shows the terrain cache. The demo server makes up a landscape
+  (`MAMMATUS_DEMO_TERRAIN=real` uses the real tiles), and the UI fuzzer now opens, moves and closes the
+  Sky view and feeds its terrain decoder junk.
+
 ## 1.1.0 — 2026-11-27
 
 ### Sky view

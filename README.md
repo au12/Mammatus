@@ -47,6 +47,9 @@ family can use it from anywhere.
   clouds of the right type, amount and height, built from the model's own cloud water and ice (HRRR,
   then RRFS, then GFS; Open-Meteo profiles marked *Estimated* only for ECMWF or outages). Clouds condense
   in when it opens and drift with the model's winds at 4× real time; the timeline keeps working.
+  The ground is the real ground: surveyed terrain for 250 km around the point, so the cut shows the true
+  profile of the land, the ranges behind it stand in layers of haze, ridges poke through a low deck, and
+  from the ground the skyline is the one outside your window.
   Thunderstorms flash with lightning that lights the cloud from inside (real GOES strikes when they are
   near), cirrostratus throws a 22° halo and sun dogs, sunlit rain makes rainbows, and nights have the
   real stars, the moon in its phase and city glow on the cloud bases. Labels name each layer with its
@@ -83,6 +86,10 @@ family can use it from anywhere.
 | HRRR simulated radar at county level, tap for details | Skew-T and indices (demo profile) |
 | ![Sky view: a thunderstorm in the afternoon](docs/screenshots/desktop-sky.jpg) | ![Sky view: the same storm at night, lit by lightning](docs/screenshots/desktop-sky-night.jpg) |
 | Sky view: a thunderstorm's dark base under its anvil, with mammatus (demo scene) | The same storm at night, lit from inside by a lightning flash |
+| ![Sky view: fair-weather cumulus over the real Blue Ridge](docs/screenshots/desktop-sky-terrain.jpg) | ![Sky view: ridges standing out of a stratus deck](docs/screenshots/desktop-sky-islands.jpg) |
+| Sky view over Asheville with the real terrain: cloud layers to scale above the Blue Ridge | The same mountains under a low stratus deck, the high ridges standing out of it like islands |
+| ![Sky view from the ground in Zermatt](docs/screenshots/desktop-sky-ground.jpg) | ![Sky view pulled back over Denver](docs/screenshots/desktop-sky-above.jpg) |
+| Standing in Zermatt: the valley walls and the Matterhorn against a high overcast | Pulled back over Denver: the plains running into the Front Range |
 
 <p align="center">
   <img src="docs/screenshots/mobile-map.jpg" width="19%" alt="Mobile map">
@@ -143,6 +150,10 @@ for an Nginx Proxy Manager walkthrough and the security model.
 | `MAMMATUS_MODELS` | `hrrr,rrfs,gfs,ecmwf,aifs` | Models to offer |
 | `MAMMATUS_CACHE_GB` | `10` | Frame cache size cap |
 | `MAMMATUS_SKY_CACHE_GB` | `2` | Sky view cache size cap (3D cloud boxes around viewed points) |
+| `MAMMATUS_TERRAIN_URL` | Terrain Tiles on AWS | Elevation tiles for the Sky view's terrain: any Terrarium-encoded `{z}/{x}/{y}` tile server, or `off` |
+| `MAMMATUS_TERRAIN_TILE_SIZE` | `256` | Pixels per tile of that server (`256` or `512`) |
+| `MAMMATUS_TERRAIN_MAX_ZOOM` | `15` | Deepest zoom that server has |
+| `MAMMATUS_TERRAIN_CACHE_GB` | `1` | Terrain cache size cap (tiles and finished patches; about 9 MB per new place) |
 | `MAMMATUS_RETENTION_HOURS` | `54` | How long model frames are kept |
 | `MAMMATUS_TRUSTED_PROXIES` | private networks | Who may set `X-Forwarded-For/Proto` |
 | `MAMMATUS_HSTS` | `false` | Send `Strict-Transport-Security` |
@@ -168,6 +179,21 @@ for an Nginx Proxy Manager walkthrough and the security model.
   packs a 40×40×64 voxel grid (3 km × 250 m) with coverage, convectiveness and layer base/top, plus a
   cloud classification, storm cells and the nearest METAR. The browser ray-marches it through tileable
   Perlin–Worley noise with multiple-scattering light, temporal accumulation and a physical sky.
+- **Terrain:** the first time a place is opened in the Sky view the server fetches about 75 open
+  elevation tiles ([Terrain Tiles on AWS](https://registry.opendata.aws/terrain-tiles/): free, no key),
+  and resamples them into three nested 1024² height grids around the point: ±16 km at 31 m, ±64 km at
+  125 m and ±256 km at 500 m, each blended into the next so they meet without a seam. (The pyramid's
+  coarse zooms carry a few false needles and pits, a dozen or so around most US places; each lone spike
+  is checked against a finer zoom and mended only if that zoom disagrees, so real pinnacles stay.) That patch
+  (1.8 MB; 0.6 MB at 512² for phones) is cached for good, on the server and in the browser. The GPU
+  holds the grids as one array texture whose mips carry the mean and the *highest* ground of each block,
+  so a ray crosses country it clears in a few steps and only tests the surface where it might touch:
+  about 11 steps per pixel. From the ground the earth's curve
+  drops distant ranges behind the horizon; the side view, a diagram at true scale, keeps the ground
+  level. If the tiles can't be reached the model's own coarse terrain stands in.
+  Any Terrarium tile server works: for [Mapterhorn](https://mapterhorn.com) set
+  `MAMMATUS_TERRAIN_URL=https://tiles.mapterhorn.com/{z}/{x}/{y}.webp`, `MAMMATUS_TERRAIN_TILE_SIZE=512`
+  and `MAMMATUS_TERRAIN_MAX_ZOOM=12`.
 - **Lightning:** GLM publishes 20-second netCDF files (170–360 KB, of which the flashes are a few KB).
   Mammatus only downloads them while someone has the layer on (about 100 MB per hour for both
   satellites, 65 MB for East alone), splits the overlap between the satellites at the longitude
@@ -191,7 +217,8 @@ pytest -q
 
 No network or model data needed for UI work: `python tools/demo_server.py --port 8099` serves the app
 with synthetic models, radar, satellite, lightning, fronts and warnings (sign in as `demo` /
-`synthetic-weather-42`).
+`synthetic-weather-42`). The Sky view's terrain is made up too; `MAMMATUS_DEMO_TERRAIN=real` uses the real
+tiles (the one part of the demo that then needs the network).
 
 Fuzzing: `MAMMATUS_FUZZ=20000 pytest tests/test_fuzz.py` runs the parser, rule-engine and API fuzzers
 deeper (`MAMMATUS_FUZZ_SEED` picks the seed), and `python tools/fuzz_ui.py --runs 5` drives random
@@ -208,6 +235,10 @@ Model data: NOAA (HRRR, RRFS, GFS via the NOAA Open Data Dissemination program) 
 (IFS, AIFS; CC BY 4.0). Radar: NOAA MRMS. Lightning: NOAA GOES-R Geostationary Lightning Mapper.
 Fronts: NOAA/NWS Weather Prediction Center. Satellite: courtesy of SSEC, University of Wisconsin–Madison
 (RealEarth). Alerts: National Weather Service. Point forecasts and soundings: Open-Meteo (CC BY 4.0).
+Terrain: [Terrain Tiles on AWS](https://registry.opendata.aws/terrain-tiles/) (Mapzen/Tilezen Joerd), which
+contains 3DEP, SRTM and GMTED2010 content courtesy of the U.S. Geological Survey, ETOPO1 content courtesy
+of NOAA, and national elevation data from Austria, Australia, Canada, Europe (EU-DEM), Mexico, New Zealand,
+Norway and the UK ([full attribution](https://github.com/tilezen/joerd/blob/master/docs/attribution.md)).
 Basemap: Natural Earth, US Census via us-atlas. Earth imagery: NASA Blue Marble & Black Marble.
 Stars: Yale Bright Star Catalog. QR codes: qrcode-generator (MIT).
 

@@ -26,6 +26,7 @@ from .data.catalog import (
 from .data.derive import NotAvailable
 from .data.http import FetchError
 from .data import sky as SKY
+from .data import terrain as TERRAIN
 from .data.models import REGISTRY
 from .data.openmeteo import RateLimited
 from .data.satellite import ATTRIBUTION as SAT_ATTRIBUTION, PRODUCTS as SAT_PRODUCTS
@@ -88,7 +89,8 @@ def catalog(request: Request, user: CurrentUser = Depends(require_user)):
         "satAttribution": SAT_ATTRIBUTION,
         "metrics": {k: {"label": v["label"], "unit": v["unit"], "agg": v["agg"]} for k, v in METRICS.items()},
         "sky": {"models": [m for m in ("hrrr", "rrfs", "gfs") if m in enabled],
-                "estimated": [{"id": k, "name": v} for k, v in SKY.ESTIMATED_MODELS.items()]},
+                "estimated": [{"id": k, "name": v} for k, v in SKY.ESTIMATED_MODELS.items()],
+                "terrain": s.terrain.enabled},
         "tz": settings.display_tz,
         "vapid": s.vapid.public_b64,
     }
@@ -354,6 +356,21 @@ async def sky_estimated(request: Request, lat: float = Query(..., ge=-89, le=89)
     except (NotAvailable, FetchError) as exc:
         raise _upstream_error(exc)
     return _sky_response(blob, 900)
+
+
+@router.get("/sky/terrain")
+async def sky_terrain(request: Request, lat: float = Query(..., ge=-89, le=89), lon: float = Query(..., ge=-180, le=180),
+                      size: int = Query(TERRAIN.SIZES[-1]), user: CurrentUser = Depends(require_user)):
+    """The real ground around a point: three nested height grids (see data/terrain.py). It never changes."""
+    if size not in TERRAIN.SIZES:
+        raise HTTPException(400, "Unsupported terrain size")
+    try:
+        blob = await svc(request).terrain.patch(lat, lon, size)
+    except (NotAvailable, FetchError) as exc:
+        raise _upstream_error(exc)
+    resp = _sky_response(blob, 30 * 86400)
+    resp.headers["Cache-Control"] += ", immutable"
+    return resp
 
 
 @router.get("/sky/observed")
@@ -730,6 +747,7 @@ def admin_system(request: Request, admin: CurrentUser = Depends(require_admin)):
         "disk": {"total": usage.total, "free": usage.free} if usage else None,
         "stats": s.frames.stats,
         "sky": s.sky.stats,
+        "terrain": {**s.terrain.stats, "enabled": s.terrain.enabled, "bytes": s.terrain.usage(), "cap": s.terrain.cap},
         "openMeteoCalls": s.om.calls,
         "openMeteoUrl": s.om.base,
         "runs": {m: {"latest": (s.runs.latest(m).run if s.runs.latest(m) else None),
@@ -747,6 +765,7 @@ def admin_cache_clear(request: Request, admin: CurrentUser = Depends(require_adm
     for sub in ("frames", "radar", "sat"):
         shutil.rmtree(root / sub, ignore_errors=True)
     s.sky.clear()
+    s.terrain.clear()
     s.frames.cache.scan()
     get_db().audit("cache_cleared", user_id=admin.id, ip=request.state.client_ip)
     return {"ok": True}

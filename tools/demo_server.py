@@ -575,6 +575,19 @@ def patch() -> None:
     SK.SkyService.estimated = sky_estimated
     SK.SkyService.observed = sky_observed
 
+    # ---- terrain: a made-up landscape (ranges, foothills, plains), or the real tiles from AWS when
+    # MAMMATUS_DEMO_TERRAIN=real (the one part of the demo that then needs the network)
+    from mammatus.data import terrain as TR
+
+    async def terrain_patch(self, lat, lon, size=TR.SIZES[-1]):
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(0.4)
+        return await loop.run_in_executor(None, TR.synth_patch, lat, lon, size)
+
+    if os.environ.get("MAMMATUS_DEMO_TERRAIN") != "real":
+        TR.TerrainService.patch = terrain_patch
+        TR.TerrainService.enabled = True
+
     OM.OpenMeteo.meteogram = om_meteogram
     OM.OpenMeteo.sounding = om_sounding
     OM.OpenMeteo.elevation = om_elevation

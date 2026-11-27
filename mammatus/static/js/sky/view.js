@@ -13,6 +13,7 @@ import { when } from "../time.js";
 import { decodeStars } from "../data/basemap.js";
 import { SkyRenderer, M4, norm, cross } from "./render.js";
 import { Loader, plan, frameIds, mergeBands, inConus, N, ZTOP } from "./data.js";
+import { fetchTerrain, modelTerrain, EARTH_R } from "./terrain.js";
 import * as A from "./astro.js";
 import { Storm } from "./bolts.js";
 import { Ambience } from "./audio.js";
@@ -96,6 +97,8 @@ export class SkyView {
     this.buildUI();
     this.r.resize();
     this.r.makeNoise();
+    this.relief = 0;            // the ground rises out of a level plain once its terrain is in
+    this.reliefAnim = null;
     this.setPoint(p, true);
     this.intro = { t0: performance.now(), dur: reducedMotion() ? 10 : 2300, dir: 1 };
     this.canvas.classList.add("in");
@@ -163,11 +166,77 @@ export class SkyView {
     this.heightOf = null;
     this.headingSet = false;
     this.cityGlow = null;
+    this._hazeAt = 0;
     this.renderTitle();
+    this.loadTerrain();
     this.onTime();
     if (this.prefs.skyObs !== false) this.loadObserved();
     this.measureCityGlow();
     if (!first) this.kick();
+  }
+
+  // ---------------------------------------------------------------- the ground
+  // Real terrain around the point (terrain.js). Until it arrives the ground is a level plain; when it does,
+  // the land rises into place. If the server has none (turned off, or the tiles can't be reached), the
+  // weather model's own coarse terrain stands in, as before.
+  loadTerrain() {
+    const token = (this._demToken = (this._demToken || 0) + 1);
+    this._demAbort?.abort();
+    this._demAbort = null;
+    this._demKey = null;
+    this.demFailed = false;
+    const key = `real@${this.p.lat},${this.p.lon}`;
+    if (this.dem?.key === key) { this.reliefTo(1, 900); return; }      // the same place again: its ground is still loaded
+    if (this.relief > 0) this.reliefTo(0, 320);                         // another place's ground sinks away
+    if (this.app.catalog?.sky?.terrain === false) { this.demFailed = true; return; }
+    const ac = (this._demAbort = new AbortController());
+    fetchTerrain(this.p.lat, this.p.lon, this.r.lowPower ? 512 : 1024, ac.signal).then((t) => this.showTerrain(t, token), (err) => {
+      if (err?.name === "AbortError" || token !== this._demToken || !this.isOpen) return;
+      this.demFailed = true;
+      const f = this.cur || [...this.frames.values()].reverse().find((x) => this.isHere(x));
+      if (f && this.isHere(f)) this.useModelTerrain(f);
+    });
+  }
+
+  isHere(f) { return !!this.p && Math.abs(f.head.lat - this.p.lat) < 1e-3 && Math.abs(f.head.lon - this.p.lon) < 1e-3; }
+
+  useModelTerrain(f) {
+    const key = `model:${f.head.model}@${this.p.lat},${this.p.lon}`;
+    if (this.dem?.key === key || this._demKey === key) return;
+    this._demKey = key;
+    this.showTerrain(modelTerrain(f.terrain, N, { elev: f.head.elev, key }), this._demToken);
+  }
+
+  async showTerrain(t, token) {
+    const pyr = await t.pyramidsLater();
+    if (token !== this._demToken || !this.isOpen) return;
+    const swap = () => {
+      if (token !== this._demToken || !this.isOpen) return;
+      this.r.setDem(t, pyr);
+      this.dem = t;
+      this._demKey = t.key;
+      this.reliefTo(1, 1150);
+      this.renderTitle();
+    };
+    // whatever ground is showing sinks first, then the new one rises
+    if (this.relief > 0.001) this.reliefTo(0, 320 * this.relief, swap); else swap();
+  }
+
+  reliefTo(v, dur, then) {
+    this.reliefAnim = { from: this.relief, to: v, t0: performance.now(), dur: reducedMotion() ? 1 : Math.max(1, dur), then };
+    this.kick();
+  }
+
+  stepRelief(now) {
+    const a = this.reliefAnim;
+    if (!a) return false;
+    const u = clamp((now - a.t0) / a.dur, 0, 1);
+    this.relief = lerp(a.from, a.to, ease(u));
+    if (u >= 1) {
+      this.reliefAnim = null;
+      a.then?.();
+    }
+    return true;
   }
 
   // ---------------------------------------------------------------- time and data
@@ -232,10 +301,7 @@ export class SkyView {
     this.frames.set(f.key, f);
     while (this.frames.size > 16) this.frames.delete(this.frames.keys().next().value);
     this.r.frame(f.key, f);
-    if (this.p && Math.abs(f.head.lat - this.p.lat) < 1e-3 && Math.abs(f.head.lon - this.p.lon) < 1e-3) {
-      this.r.setTerrain(f.terrain);
-      this.terrain = f.terrain;
-    }
+    if (this.demFailed && this.isHere(f)) this.useModelTerrain(f);
     this.kick();
   }
 
@@ -337,6 +403,19 @@ export class SkyView {
     const cityCol = [1.0, 0.56, 0.24].map((x) => x * glow * 0.05 * night);
     const exposure = lerp(1.0, 4.2, night) * lerp(1, 1.2, golden);
     const sfc = this.cur?.head.sfc || {};
+    // How far you can see along the ground follows the humidity there: about 180 km in dry air, 60 km at
+    // 70 %, under 20 km when it is nearly saturated. (Real ranges on the horizon deserve honest air.)
+    let hazeLow = 0.6;
+    if (sfc.t2m != null && sfc.d2m != null) {
+      const es = (k) => Math.exp(17.625 * (k - 273.15) / (k - 30.11));
+      const rh = clamp(es(sfc.d2m) / es(sfc.t2m), 0, 1);
+      hazeLow = 0.22 + 0.55 * smooth(0.3, 0.75, rh) + 1.6 * smooth(0.75, 0.98, rh);
+    }
+    // eased, so stepping through the hours doesn't make the horizon jump
+    const nowMs = performance.now();
+    const dtH = Math.min(1, (nowMs - (this._hazeAt || 0)) / 600);
+    this._haze = this._haze == null || !this._hazeAt ? hazeLow : lerp(this._haze, hazeLow, dtH);
+    this._hazeAt = nowMs;
     const snowing = this.cur?.head.precip?.kind === "snow";
     const snow = (sfc.t2m != null && sfc.t2m < 272.5 && (snowing || Math.abs(lat) > 40)) ? (snowing ? 0.75 : 0.35) : 0;
     // equatorial -> local sky, for the stars
@@ -349,7 +428,7 @@ export class SkyView {
     return {
       light: useSun ? sunDir : moonDir, lightI, sunDir, sunCol, moonDir, moonCol: [0.9, 0.92, 1.0].map((x) => x * 0.55),
       moonIllum: moon.illum, night, ambTop, ambBot, cityCol, exposure, lut, elev, lat, lon, snow, cityGlow: glow,
-      starVis: Math.pow(night, 2) * (1 - 0.5 * moonUp), rays: day * 0.9, eq, sun, moon,
+      starVis: Math.pow(night, 2) * (1 - 0.5 * moonUp), rays: day * 0.9, eq, sun, moon, hazeLow: this._haze,
     };
   }
 
@@ -363,27 +442,14 @@ export class SkyView {
   }
 
   // ---------------------------------------------------------------- camera
-  // the box's terrain (km, relative to the point)
+  // the ground as drawn (km, relative to the point): the terrain at its current relief, less the earth's curve
   groundAt(x, y) {
-    const T = this.terrain;
-    if (!T) return 0;
-    const fx = clamp((x + 60) / 3 - 0.5, 0, N - 1.001), fy = clamp((y + 60) / 3 - 0.5, 0, N - 1.001);
-    const i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j;
-    const at = (a, b) => T[b * N + a];
-    return lerp(lerp(at(i, j), at(i + 1, j), u), lerp(at(i, j + 1), at(i + 1, j + 1), u), v);
+    const h = this.dem && this.relief > 0 ? this.dem.heightAt(x, y) * this.relief : 0;
+    return h - (this.curve || 0) * (x * x + y * y);
   }
 
-  // a safe height to keep the camera above (the shader adds hills and ridges on top of the box terrain)
-  terrainAt(x, y) {
-    const T = this.terrain;
-    if (!T) return 0;
-    const fx = clamp((x + 60) / 3 - 0.5, 0, N - 1.001), fy = clamp((y + 60) / 3 - 0.5, 0, N - 1.001);
-    const i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j;
-    const at = (a, b) => T[b * N + a];
-    const val = lerp(lerp(at(i, j), at(i + 1, j), u), lerp(at(i, j + 1), at(i + 1, j + 1), u), v);
-    const out = Math.max(Math.abs(x), Math.abs(y)) - 60;
-    return out > 0 ? lerp(val, 0, smooth(0, 30, out)) + 0.35 : val + 0.1;
-  }
+  // a height the camera must stay above
+  terrainAt(x, y) { return this.groundAt(x, y); }
 
   // Side view framing. At true scale the ground sits just above the timeline and 52,000 ft just under the
   // header: the whole screen spans a little more than that, centred so those two land where they should.
@@ -410,7 +476,7 @@ export class SkyView {
     return { heading: this.view.heading * DEG, pitch, D, fov, zT, s, Hp, aspect };
   }
 
-  camFrom(q, aspect) {
+  camFrom(q, aspect, cut) {
     const { heading: hd, pitch } = q;
     const fwd = [Math.sin(hd) * Math.cos(pitch), Math.cos(hd) * Math.cos(pitch), -Math.sin(pitch)];
     const hint = norm([lerp(0, Math.sin(hd), smooth(60 * DEG, 88 * DEG, pitch)), lerp(0, Math.cos(hd), smooth(60 * DEG, 88 * DEG, pitch)), lerp(1, 0.02, smooth(60 * DEG, 88 * DEG, pitch))]);
@@ -420,9 +486,12 @@ export class SkyView {
     let s = q.s;
     const T = [0, 0, q.zT];
     let pos = [T[0] - up[0] * s * half - fwd[0] * q.D, T[1] - up[1] * s * half - fwd[1] * q.D, T[2] - up[2] * s * half - fwd[2] * q.D];
-    // never under the ground: lift the camera and shift the lens back so the point stays framed
+    // never under the ground: lift the camera and shift the lens back so the point stays framed. (Not when
+    // the camera stands in the part of the world the side view has cut away: real mountains out there, a
+    // hundred kilometres in front of the point, are not drawn and must not change the framing.)
+    const cutAway = cut && cut[3] > 0.5 && pos[0] * cut[0] + pos[1] * cut[1] < cut[2];
     const g = this.terrainAt(pos[0], pos[1]) + 0.12;
-    if (pos[2] < g) {
+    if (!cutAway && pos[2] < g) {
       const dz = g - pos[2];
       pos[2] = g;
       s -= dz / Math.max(up[2], 0.2) / half;
@@ -434,7 +503,7 @@ export class SkyView {
 
   camera(now) {
     const aspect = this.r.W / this.r.H;
-    let c, cut = [0, 1, -1e4, 0], stylize = 0, refDist = 30;
+    let c, cut = [0, 1, -1e4, 0], stylize = 0, refDist = 30, grounded = 0;
     const k = this.view.zoom;
     const side = this.sideParams(k);
     const tilt = this.tilt || { yaw: 0, pitch: 0 };
@@ -453,7 +522,6 @@ export class SkyView {
         q.zT = lerp(top.zT, q.zT, u);
         q.s = lerp(top.s, q.s, u);
       }
-      c = this.camFrom(q, aspect);
       const fh = [Math.sin(q.heading), Math.cos(q.heading)];
       cut = [fh[0], fh[1], -(6 + 140 * smooth(0.15, 0.8, k)), this.intro && this.intro.dir < 0 ? 0 : 1];
       this.slab = [9 + 170 * smooth(0.1, 0.6, k), 5 + 20 * smooth(0.1, 0.6, k)];
@@ -466,6 +534,7 @@ export class SkyView {
         this.slab = [this.slab[0] + open * 200, this.slab[1]];
         stylize *= this.intro.dir > 0 ? smooth(0.35, 0.9, u) : 1 - smooth(0, 0.5, u);
       }
+      c = this.camFrom(q, aspect, cut);
     }
     if (this.view.mode === "ground" || this.modeAnim) {
       const hd = (this.view.heading + tilt.yaw) * DEG, pt = clamp(this.view.look + tilt.pitch, -8, 88) * DEG;
@@ -479,15 +548,21 @@ export class SkyView {
         const toGround = this.modeAnim.to === "ground";
         const w = toGround ? u : 1 - u;
         const pos2 = c.pos.map((x, i) => lerp(x, g.pos[i], w));
+        // once the cut-away closes the flight is over real country: stay above it
+        if (w > 0.3) pos2[2] = Math.max(pos2[2], this.groundAt(pos2[0], pos2[1]) + 0.0018 + 0.15 * (1 - w));
         const fwd2 = norm(c.fwd.map((x, i) => lerp(x, g.fwd[i], w)));
         const fov2 = lerp(c.fov, g.fov, w);
         const hint2 = Math.abs(fwd2[2]) > 0.99 ? [Math.sin(hd), Math.cos(hd), 0] : [0, 0, 1];
         c = { pos: pos2, fwd: fwd2, right: norm(cross(fwd2, hint2)), up: [0, 0, 1], view: M4.lookDir(pos2, fwd2, hint2), proj: M4.persp(fov2, aspect, 0.001, 900, lerp(side.s, 0, w)), fov: fov2 };
         cut[3] = w > 0.3 ? 0 : cut[3];
         stylize *= 1 - w;
+        grounded = w;
         if (u >= 1) this.modeAnim = null;
-      } else c = g;
+      } else { c = g; grounded = 1; }
     }
+    // From the ground the earth curves away under distant country (a range 200 km off stands 2.7 km lower
+    // against the horizon). The side view is a diagram at true scale, so there the ground stays level.
+    this.curve = grounded / (2 * EARTH_R);
     c.vp = M4.mul(c.proj, c.view);
     c.invVP = M4.inv(c.vp);
     c.cut = cut;
@@ -517,6 +592,8 @@ export class SkyView {
       if (now - this.intro.t0 >= this.intro.dur) this.intro = null;
     }
     if (this.modeAnim) busy = true;
+    const rising = this.stepRelief(now);
+    if (rising) busy = true;
     const changed = this.updateDisplay(now);
     if (changed || this.display.morph) busy = true;
     if (this.appear.t0) {
@@ -540,7 +617,7 @@ export class SkyView {
       this.dirty = false;
       try {
         // with nothing loaded yet the empty sky still draws, so the swoop happens
-        this.draw(now, { moving: interacting || !!this.intro || !!this.modeAnim || !this.display.A, dataChanged: !!this.display.morph || changed || fl.lights.length > 0, flashes: fl.lights, bolts: fl.bolts });
+        this.draw(now, { moving: interacting || !!this.intro || !!this.modeAnim || rising || !this.display.A, dataChanged: !!this.display.morph || changed || fl.lights.length > 0, flashes: fl.lights, bolts: fl.bolts });
         this.fails = 0;
       } catch (err) {
         if (!this.fails) console.error("Mammatus: sky view failed to draw", err);
@@ -584,6 +661,7 @@ export class SkyView {
     const s = {
       cam, env: e, time: this.driftT || 0, moving, dataChanged,
       weather: { a: D.A, b: D.B || D.A, mix: D.mix, appear: this.appear.v, mammatus: mam, bands, ext: 0.4 },
+      ground: { relief: this.relief, curve: this.curve || 0 },
       flashes, bolts,
     };
     this.lastState = s;
@@ -757,7 +835,9 @@ export class SkyView {
     const name = this.app.savedPoint?.(this.p)?.name || this.p.name || "this point";
     this.titleEl.firstChild.textContent = `Sky over ${name}`;
     const t = new Date((this.t || Date.now() / 1000) * 1000);
-    const g = this.cur ? ` · ground ${heightOne(this.cur.head.elev)}` : "";
+    // the surveyed height when the real terrain is in, else the weather model's idea of it
+    const elev = this.dem?.real && this.dem.key === `real@${this.p.lat},${this.p.lon}` ? this.dem.elev : this.cur?.head.elev;
+    const g = elev != null ? ` · ground ${heightOne(elev)}` : "";
     this.titleEl.lastChild.textContent = `${when(t)}${g}`;
     const hd = this.cur?.head;
     if (hd) {
@@ -767,7 +847,8 @@ export class SkyView {
       this.srcBtn.classList.toggle("estimated", !!est);
       this.srcBtn.title = est ? "Estimated: Open-Meteo derives cloud by height from humidity, not from the model's own cloud water." : `${hd.source} cloud water, ice, rain and snow · ${hd.attribution}`;
       const attr = this.app.attrib;
-      if (attr) attr.textContent = `Sky: ${hd.source} · ${hd.attribution}${est ? " · estimated" : ""}`;
+      const land = this.dem?.real && this.dem.attribution ? ` · Terrain: ${this.dem.attribution.split(" (")[0]}` : "";
+      if (attr) attr.textContent = `Sky: ${hd.source} · ${hd.attribution}${est ? " · estimated" : ""}${land}`;
     } else this.srcBtn.innerHTML = "<b>Loading…</b>";
   }
 

@@ -77,6 +77,7 @@ uniform vec3 u_ambBot;       // light from the ground
 uniform float u_elev;        // ground height at the point, km above sea level
 uniform vec2 u_lat0;         // latitude, longitude of the point (deg)
 uniform float u_hazeK;       // how hazy the air is (the side view keeps distant ridges readable)
+uniform float u_hazeLow;     // ... and its lowest kilometre or two in particular: damp air is hazy, dry air clear
 uniform vec4 u_cut;          // side view: xy horizontal forward, z cut distance (in front of the point), w on
 uniform vec2 u_slab;         // side view: clouds end this far behind the point (x), fading over y
 float planeDist(vec2 xy) { return dot(xy, u_cut.xy); }
@@ -105,7 +106,189 @@ float hazeDepth(vec3 ro, vec3 rd, float t) {
       t -= tc;
     }
   }
-  return (0.011 * airDepth(ro, rd, t, 8.0) + 0.075 * airDepth(ro, rd, t, 1.3)) * u_hazeK;
+  return (0.011 * airDepth(ro, rd, t, 8.0) + 0.075 * u_hazeLow * airDepth(ro, rd, t, 1.3)) * u_hazeK;
+}
+`;
+
+
+// The ground: three nested height grids around the point, finest in the middle (terrain.js), in km relative
+// to the ground at the point. r = height, g = the highest ground around the texel; the mips hold the mean
+// and the maximum, so a ray can step over whole blocks of country that lie below it.
+const DEM = /* glsl */ `
+uniform highp sampler2DArray u_dem;
+uniform vec3 u_demHalf;      // half-width of each grid, km
+uniform vec4 u_demInfo;      // texels per side, mip levels, relief (0 flat .. 1 full), earth curvature 1/(2R) per km
+uniform vec3 u_demRange;     // lowest and highest ground, and the level plain beyond the outer grid (km)
+uniform float u_demSea;      // sea level in the grids' heights (km; far below everything when not known)
+uniform int u_demSteps;
+// the skyline the last traced ray slipped just over on its way to the sky: where, and how much of the
+// pixel it covers
+float gEdgeT = -1.0, gEdgeCov = 0.0;
+
+// which grid draws the ground here: the finest one that reaches (each ends half a texel short of its
+// edge, where its rim has already become the next grid)
+int demLayer(vec2 xy) {
+  float m = max(abs(xy.x), abs(xy.y));
+  vec3 lim = u_demHalf * (1.0 - 1.0 / u_demInfo.x);
+  return m < lim.x ? 0 : (m < lim.y ? 1 : 2);
+}
+// ground height at xy averaged over a footprint (km); the earth's curve drops distant ground away
+float demH(vec2 xy, float foot) {
+  int k = demLayer(xy);
+  float hw = u_demHalf[k];
+  float lod = clamp(log2(max(foot * u_demInfo.x / (2.0 * hw), 1.0)), 0.0, u_demInfo.y - 1.0);
+  return textureLod(u_dem, vec3(xy / (2.0 * hw) + 0.5, float(k)), lod).r * u_demInfo.z - u_demInfo.w * dot(xy, xy);
+}
+float demH(vec2 xy) { return demH(xy, 0.0); }
+
+// Where a ray first meets the ground between t0 and t1 (-1.0 if it doesn't). A walk down the pyramid of
+// maxima: a block the ray clears is crossed in one step, a block it might touch is opened into its four
+// children, and in the finest cells (or cells smaller than a pixel) the surface itself is tested.
+// When the ray reaches the sky, the crest it cleared most narrowly is left in gEdgeT / gEdgeCov (if that
+// was by less than a pixel), so the skyline can be drawn smooth.
+float demTrace(vec3 ro, vec3 rd, float t0, float t1, float pix) {
+  gEdgeT = -1.0; gEdgeCov = 0.0;
+  float nearC = 1e9, nearT = 0.0;      // the closest pass so far, in pixels, and where
+  float S = u_demInfo.x, relief = u_demInfo.z, curve = u_demInfo.w;
+  // nothing stands above the highest ground
+  float zTop = max(u_demRange.y * relief, 0.0) + 0.02;
+  if (ro.z > zTop) {
+    if (rd.z > -1e-6) return -1.0;
+    t0 = max(t0, (ro.z - zTop) / -rd.z);
+  } else if (rd.z > 1e-6) t1 = min(t1, (zTop - ro.z) / rd.z);
+  if (t1 <= t0) return -1.0;
+  vec2 rdx = mix(rd.xy, vec2(1e-7), lessThan(abs(rd.xy), vec2(1e-7)));
+  vec2 inv = 1.0 / rdx;
+  // the stretch of the ray over the outer grid
+  float H = u_demHalf.z;
+  vec2 ta = (-H - ro.xy) * inv, tb = (H - ro.xy) * inv;
+  float tIn = max(min(ta.x, tb.x), min(ta.y, tb.y)), tOut = min(max(ta.x, tb.x), max(ta.y, tb.y));
+  float tA = max(t0, tIn), tB = min(t1, tOut);
+  bool spent = false;
+  if (tB > tA) {
+    vec3 o = ro + rd * tA;        // distances are measured from here, so they stay small and exact
+    float len = tB - tA, s = 0.0;
+    // start with blocks of 8 x 8 texels (most rays begin near the ground, or dive at it) and climb to
+    // bigger blocks, up to 4 x 4 to a grid, while the way is clear
+    int top = int(u_demInfo.y) - 3, lod = min(3, top);
+    float fLast = 0.0;                              // height above the ground where the last cell was left ...
+    bool chained = false;                           // ... when this cell follows straight on from it
+    spent = true;
+    for (int i = 0; i < 256; i++) {
+      if (i >= u_demSteps) break;
+      if (s >= len) { spent = false; break; }
+      vec3 p = o + rd * s;
+      int k = demLayer(p.xy);
+      float hw = u_demHalf[k];
+      float n = float(int(S) >> lod);
+      float cw = 2.0 * hw / n;
+      // the cell the ray is in or just entering: a ray running along a cell wall (every ray leaving the point
+      // due north, east, south or west does) must not flicker between the two sides of it
+      vec2 cell = clamp(floor((p.xy + hw) / cw + 2e-4 * sign(rdx)), 0.0, n - 1.0);
+      vec2 lo = cell * cw - hw, hi = lo + cw;
+      // an inner grid stops where demLayer says it does, so a block never reaches past that
+      if (k < 2) { float lim = hw * (1.0 - 1.0 / S); lo = max(lo, vec2(-lim)); hi = min(hi, vec2(lim)); }
+      // where the ray leaves this cell
+      vec2 tw = (mix(lo, hi, step(0.0, rdx)) - p.xy) * inv;
+      float e = min(s + max(min(tw.x, tw.y), 0.0), len);
+      // ... and whether that wall is also a wall of the parent block (worth trying the bigger block again)
+      float ci = tw.x < tw.y ? cell.x : cell.y, cd = tw.x < tw.y ? rdx.x : rdx.y;
+      bool outOfParent = mod(ci, 2.0) == (cd > 0.0 ? 1.0 : 0.0);
+      float eps = max(cw * 2e-3, (tA + s) * 1e-6);
+      // the highest the ground gets in the cell (the curve drops it at least as much as at its nearest corner)
+      vec2 q = clamp(vec2(0.0), lo, hi);
+      vec2 hg = texelFetch(u_dem, ivec3(ivec2(cell), k), lod).rg * relief - curve * dot(q, q);
+      float zLow = min(p.z, o.z + rd.z * e);
+      if (zLow > hg.y + 0.003) {
+        s = e + eps;
+        if (outOfParent) lod = min(lod + 1, top);
+        chained = false;
+        continue;
+      }
+      float foot = lod > 0 && cw < pix * (tA + s) ? cw : 0.0;
+      if (lod > 0 && foot == 0.0) { lod--; chained = false; continue; }
+      float f0 = chained ? fLast : p.z - demH(p.xy, foot);
+      if (f0 < 0.0) return tA + s;
+      // Inside a cell the surface is four bilinear pieces that meet along the cell's centre lines, and its
+      // texel is the height at the very centre. A ray that stays above that height need only be tested where
+      // it leaves; one that dips below it is tested where it crosses the centre lines too, so a crest a
+      // single texel wide can't be stepped over.
+      vec2 um = zLow < hg.x + 0.003 ? clamp(((cell + 0.5) * cw - hw - p.xy) * inv, 0.0, e - s) : vec2(e - s);
+      float a = s, fa = f0;
+      for (int j = 0; j < 3; j++) {
+        float b = j == 0 ? s + min(um.x, um.y) : (j == 1 ? s + max(um.x, um.y) : e);
+        if (b - a < eps * 0.25) continue;
+        vec3 pb = o + rd * b;
+        float fb = pb.z - demH(pb.xy, foot);
+        if (fb < 0.0) {
+          // the crossing lies between a (above ground) and b (below): halve the gap a few times, then one
+          // straight-line step between the two heights lands on it (exactly, where the ground is flat)
+          for (int m = 0; m < 3; m++) {
+            float h = 0.5 * (a + b);
+            vec3 ph = o + rd * h;
+            float fh = ph.z - demH(ph.xy, foot);
+            if (fh < 0.0) { b = h; fb = fh; } else { a = h; fa = fh; }
+          }
+          return tA + a + (b - a) * fa / max(fa - fb, 1e-9);
+        }
+        // how narrowly the ray clears the ground here, in pixels
+        float c = fb / (pix * (tA + b) + 1e-6);
+        if (c < nearC) { nearC = c; nearT = tA + b; }
+        a = b; fa = fb;
+      }
+      s = e + eps;
+      fLast = fa; chained = foot == 0.0;      // (cells standing in for several texels are read at their own level)
+      if (outOfParent && lod < top) { lod++; chained = false; }
+    }
+    // Out of steps: a ray skimming rough country for kilometres. If it is within a few pixels of the ground,
+    // that is the ground; otherwise the rest of the way is walked in plain strides of 3 % of the distance
+    // over ground smoothed to match, so the hill it was heading for still stops it.
+    if (spent) {
+      float t = tA + min(s, len);
+      vec3 p = ro + rd * t;
+      if (p.z - demH(p.xy) < max(0.01, 4.0 * pix * t)) return t;
+      for (int j = 0; j < 48; j++) {
+        float tn = min(t * 1.03 + 0.02, tA + len);
+        vec3 pn = ro + rd * tn;
+        if (pn.z < demH(pn.xy, (tn - t) * 0.5)) {
+          float a = t, b = tn;
+          for (int m = 0; m < 5; m++) { float h = 0.5 * (a + b); vec3 ph = ro + rd * h; if (ph.z < demH(ph.xy, (tn - t) * 0.25)) b = h; else a = h; }
+          return 0.5 * (a + b);
+        }
+        if (tn >= tA + len) break;
+        t = tn;
+      }
+    }
+  }
+  // past the outer grid the country is a level plain (curving away with the earth)
+  float tS = tB > tA ? tOut : t0;
+  float b0 = u_demRange.z * relief;
+  float A = curve * dot(rd.xy, rd.xy), B = rd.z + 2.0 * curve * dot(ro.xy, rd.xy), C = ro.z - b0 + curve * dot(ro.xy, ro.xy);
+  float tp = -1.0;
+  if (A < 1e-9) { if (B < -1e-7) tp = -C / B; }
+  else { float disc = B * B - 4.0 * A * C; if (disc >= 0.0) tp = (-B - sqrt(disc)) / (2.0 * A); }
+  if (tp > tS && tp < t1) return tp;
+  // the ray reached the sky: the crest it cleared by less than a pixel shares that pixel with the sky
+  if (nearC < 1.0) { gEdgeCov = 1.0 - nearC; gEdgeT = nearT; }
+  return -1.0;
+}
+
+// How much of the sun the ground itself leaves: ridges throw long soft shadows when the light is low.
+float demSunlit(vec3 p, vec3 n, vec3 L, float foot) {
+  float low = 1.0 - smoothstep(0.35, 0.62, L.z);
+  if (low <= 0.0 || L.z <= 0.0) return 1.0;
+  float zTop = u_demRange.y * u_demInfo.z;
+  float lit = 1.0, t = max(foot * 2.0, 0.06);
+  vec3 o = p + n * max(foot, 0.01);
+  for (int i = 0; i < 9; i++) {
+    vec3 q = o + L * t;
+    if (q.z > zTop) break;                    // nothing left that could stand in the light
+    float d = q.z - demH(q.xy, t * 0.2);
+    lit = min(lit, 0.5 + 9.0 * d / t);
+    if (lit <= 0.0) break;
+    t *= 1.9;
+  }
+  return mix(1.0, smoothstep(0.0, 1.0, lit), low);
 }
 `;
 
@@ -330,18 +513,18 @@ void main() {
 export const SHADOW_FS = /* glsl */ `#version 300 es
 precision highp float;
 precision highp sampler3D;
+precision highp sampler2DArray;
 ${COMMON}
+${DEM}
 ${CLOUD}
-uniform sampler2D u_terrain;
 uniform vec2 u_size;
 uniform float u_span;
 out vec4 o;
-float terrainH(vec2 xy) { return texture(u_terrain, (xy + BOX_HALF) / BOX).r; }
 void main() {
   vec2 xy = (gl_FragCoord.xy / u_size - 0.5) * u_span;
   vec3 L = u_light;
   if (L.z < 0.02) { o = vec4(1.0); return; }
-  vec3 p = vec3(xy, max(terrainH(xy), 0.0));
+  vec3 p = vec3(xy, max(demH(xy, u_span / u_size.x), 0.0));
   float tau = 0.0;
   float len = min((ZTOP - p.z) / L.z, 70.0);
   const int N = 30;
@@ -363,10 +546,12 @@ void main() {
 export const BG_FS = /* glsl */ `#version 300 es
 precision highp float;
 precision highp sampler3D;
+precision highp sampler2DArray;
 ${COMMON}
+${DEM}
 uniform vec2 u_res;
+uniform float u_pix;             // radians per pixel
 uniform sampler2D u_skyLUT;
-uniform sampler2D u_terrain;     // relative heights (km) in the box
 uniform sampler2D u_day;
 uniform sampler2D u_nightTex;
 uniform sampler2D u_shadow;
@@ -393,17 +578,6 @@ float vnoise(vec2 p) {
   return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y);
 }
 float fbm2(vec2 p, int oct) { float s = 0.0, a = 0.5; for (int i = 0; i < 6; i++) { if (i >= oct) break; s += a * vnoise(p); p = p * 2.03 + 17.1; a *= 0.5; } return s; }
-
-float boxTerrain(vec2 xy) { return texture(u_terrain, (xy + BOX_HALF) / BOX).r; }
-// the box's terrain, carried past its edge with rolling hills, plus fine ridges
-float terrainH(vec2 xy, int oct) {
-  float inside = 1.0 - smoothstep(0.0, 30.0, max(abs(xy.x), abs(xy.y)) - BOX_HALF);
-  float relief = 0.12 + 0.6 * smoothstep(0.0, 1.2, abs(boxTerrain(xy)) + 0.15);
-  float hills = (fbm2(xy * 0.045 + 3.0, 3) - 0.5) * 0.8 * relief;
-  // fine ridges everywhere but right at the point, where the ground view stands
-  float fine = (fbm2(xy * 0.6, oct) - 0.5) * 0.18 * relief * smoothstep(0.05, 1.5, length(xy));
-  return mix(hills, boxTerrain(xy), inside) + fine;
-}
 
 vec2 lonlat(vec2 xy) {
   float lat = u_lat0.x + xy.y / 111.195;
@@ -512,6 +686,81 @@ vec3 discs(vec3 rd) {
   return col;
 }
 
+// aerial perspective: boundary-layer haze and air between the camera and something t away. The haze glows
+// with the light that reaches it, so under a storm or a solid deck the far country goes dull instead of
+// shining through the rain like a clear day's horizon.
+vec3 hazed(vec3 col, vec3 ro, vec3 rd, float t) {
+  float f = 1.0 - exp(-hazeDepth(ro, rd, t));
+  float t0 = 0.0;
+  if (u_cut.w > 0.5) { float den = dot(rd.xy, u_cut.xy); if (den > 1e-6) t0 = clamp((u_cut.z - dot(ro.xy, u_cut.xy)) / den, 0.0, t); }
+  vec3 pa = ro + rd * mix(t0, t, 0.35), pb = ro + rd * t;
+  float lit = 0.5 * (texture(u_shadow, pa.xy / u_shadowSpan + 0.5).r + texture(u_shadow, pb.xy / u_shadowSpan + 0.5).r);
+  return mix(col, skyColor(normalize(vec3(rd.xy, max(rd.z, 0.02)))) * mix(0.3, 1.0, lit), f);
+}
+
+// The Blue Marble's colour for a place. (Read at an explicit level: implicit derivatives are undefined
+// after the trace's loops and early returns, and show up as stray pixels along the screen's diagonal. The
+// texture's texels are kilometres wide.)
+vec3 imagery(vec2 tuv) { return textureLod(u_day, tuv, 0.0).rgb; }
+// what the ground reflects: those colours (which run dark), lifted to plausible albedos
+vec3 albedoOf(vec3 tex) { return pow(tex, vec3(1.35)) * 0.58; }
+
+// the ground where the ray meets it, t along the ray
+vec3 groundColor(vec3 ro, vec3 rd, float t) {
+  vec3 p = ro + rd * t;
+  // the slope, measured over a texel (or a pixel, when that is larger) each way: smooth, not faceted
+  float foot = t * u_pix;
+  float e = max(2.0 * u_demHalf[demLayer(p.xy)] / u_demInfo.x, foot);
+  vec3 n = normalize(vec3(demH(p.xy - vec2(e, 0), foot) - demH(p.xy + vec2(e, 0), foot),
+                          demH(p.xy - vec2(0, e), foot) - demH(p.xy + vec2(0, e), foot), 2.0 * e));
+  float steep = smoothstep(0.16, 0.42, 1.0 - n.z);          // from about 33 degrees
+  // texture finer than the grid, close up: in the shading only, the outline stays the measured ground
+  float close = 1.0 - smoothstep(0.004, 0.03, foot);
+  if (close > 0.0) {
+    float g0 = fbm2(p.xy * 9.0, 3);
+    vec2 g = vec2(fbm2(p.xy * 9.0 + vec2(0.35, 0.0), 3), fbm2(p.xy * 9.0 + vec2(0.0, 0.35), 3)) - g0;
+    n = normalize(n + vec3(-g, 0.0) * close * (0.35 + 1.4 * steep));
+  }
+  vec2 ll = lonlat(p.xy);
+  vec2 tuv = vec2((ll.x + 180.0) / 360.0, (90.0 - ll.y) / 180.0);
+  vec3 tex = imagery(tuv);
+  float cloudSh = texture(u_shadow, p.xy / u_shadowSpan + 0.5).r;
+  // The sea: ground at sea level that the imagery doesn't show as land (basins below sea level are land).
+  // Dark from above, a mirror of the sky toward the horizon, with the sun's glitter on it.
+  float asl = (demH(p.xy) + u_demInfo.w * dot(p.xy, p.xy)) / max(u_demInfo.z, 1e-3) - u_demSea;
+  bool land = max(tex.r, tex.g) > tex.b + 0.06 && tex.r + tex.g + tex.b > 0.54;
+  if (asl < 0.0008 && !land) {
+    float fres = 0.02 + 0.6 * pow(1.0 - clamp(-rd.z, 0.0, 1.0), 5.0);       // (waves keep it short of a perfect mirror)
+    vec3 mirror = skyColor(normalize(vec3(rd.xy, max(-rd.z, 0.03))));
+    vec3 lightS = lightColor(u_elev) * cloudSh;
+    vec3 sea = vec3(0.008, 0.026, 0.05) * (lightS * max(u_light.z, 0.0) + u_ambTop) + mirror * fres * 0.8;
+    sea += lightS * 2.0 * pow(max(dot(reflect(rd, vec3(0.0, 0.0, 1.0)), u_light), 0.0), 260.0);
+    return hazed(sea, ro, rd, t);
+  }
+  vec3 alb = albedoOf(tex);
+  float grain = fbm2(p.xy * 1.7, 3);
+  // land the imagery paints as sea (its texels are 10 km wide: small islands, the shore) takes an earth tone
+  alb = mix(alb, vec3(0.085, 0.095, 0.055), clamp((tex.b - max(tex.r, tex.g)) * 6.0, 0.0, 1.0));
+  alb *= 0.75 + 0.5 * grain;
+  if (close > 0.0) alb *= mix(1.0, 0.8 + 0.4 * fbm2(p.xy * 37.0, 3), close);     // fields and woods underfoot
+  // steep ground is bare rock
+  alb = mix(alb, vec3(0.2, 0.185, 0.165) * (0.7 + 0.7 * grain), steep * 0.7);
+  alb = mix(alb, vec3(0.8, 0.83, 0.87), u_snow * smoothstep(0.35, 0.75, n.z));
+  float sh = cloudSh * demSunlit(p, n, u_light, max(e, foot));
+  vec3 Ls = lightColor(p.z + u_elev) * max(dot(n, u_light), 0.0) * sh;
+  // skylight: less of the sky is seen from a valley floor than from a ridge
+  float open = clamp(1.0 + 2.2 * (p.z - demH(p.xy, max(8.0 * e, 1.5))), 0.6, 1.12);
+  vec3 amb = mix(u_ambBot, u_ambTop, 0.5 + 0.5 * n.z) * 0.9 * open;
+  vec3 col = alb * (Ls + amb);
+  // city lights at night: warm points scattered through the lit area, not a glowing sheet
+  if (u_night > 0.005) {
+    float lit = pow(textureLod(u_nightTex, tuv, 0.0).r, 2.2);
+    float pts = smoothstep(0.58, 0.82, fbm2(p.xy * 9.0, 3)) * (0.4 + 0.6 * smoothstep(0.3, 0.7, fbm2(p.xy * 1.3 + 7.0, 2)));
+    col += vec3(1.0, 0.62, 0.32) * lit * (0.004 + 0.12 * pts) * u_night;
+  }
+  return hazed(col, ro, rd, t);
+}
+
 void main() {
   vec2 ndc = gl_FragCoord.xy / u_res * 2.0 - 1.0;
   vec3 rd = rayDir(ndc);
@@ -526,34 +775,14 @@ void main() {
     if (den > 1e-6) {
       tCut = (u_cut.z - planeDist(ro.xy)) / den;
       vec3 pc = ro + rd * tCut;
-      if (tCut > 0.0 && pc.z < terrainH(pc.xy, 4)) { tHit = tCut; face = true; }
-    }
-  }
-  // terrain: only rays heading down far enough can reach it
-  float maxH = 2.6;
-  if (!face && (rd.z < 0.0 || ro.z < maxH)) {
-    float t = rd.z < 0.0 ? max(tCut, (ro.z - maxH) / -rd.z) : tCut;
-    float tEnd = min(u_far, rd.z < -1e-4 ? (ro.z + 1.0) / -rd.z : u_far);
-    float prevD = 1.0, prevT = t;
-    for (int i = 0; i < 96; i++) {
-      if (t > tEnd) break;
-      vec3 p = ro + rd * t;
-      float d = p.z - terrainH(p.xy, 3);
-      if (d < 0.0) {
-        float a = prevT, b = t;
-        for (int k = 0; k < 5; k++) { float m = 0.5 * (a + b); vec3 q = ro + rd * m; if (q.z - terrainH(q.xy, 3) < 0.0) b = m; else a = m; }
-        tHit = 0.5 * (a + b);
-        break;
-      }
-      prevD = d; prevT = t;
-      t += max(d * 0.55, 0.004 + t * 0.0025);
+      if (tCut > 0.0 && pc.z < demH(pc.xy)) { tHit = tCut; face = true; }
     }
   }
   vec3 col;
   float depth;
   if (face) {
     vec3 p = ro + rd * tHit;
-    float below = terrainH(p.xy, 4) - p.z;
+    float below = demH(p.xy) - p.z;
     // soil over rock, with faint strata; a lit rim of ground along the top
     vec3 soil = vec3(0.060, 0.042, 0.030), rock = vec3(0.026, 0.022, 0.021);
     vec3 earth = mix(soil, rock, smoothstep(0.02, 0.35, below));
@@ -561,38 +790,26 @@ void main() {
     vec3 lit = lightColor(u_elev) * max(u_light.z, 0.0) * 0.35 + u_ambTop * 0.6 + u_ambBot * 0.5;
     col = earth * strata * lit;
     vec2 ll = lonlat(p.xy);
-    vec3 grass = pow(texture(u_day, vec2((ll.x + 180.0) / 360.0, (90.0 - ll.y) / 180.0)).rgb, vec3(2.2));
+    vec3 grass = albedoOf(imagery(vec2((ll.x + 180.0) / 360.0, (90.0 - ll.y) / 180.0)));
     col = mix(col, grass * (lightColor(u_elev) * max(u_light.z, 0.0) + u_ambTop), smoothstep(0.012, 0.0, below));
-    depth = tHit;
-  } else if (tHit > 0.0) {
-    vec3 p = ro + rd * tHit;
-    float e = 0.02 + tHit * 0.0015;
-    vec3 n = normalize(vec3(terrainH(p.xy - vec2(e, 0), 5) - terrainH(p.xy + vec2(e, 0), 5),
-                            terrainH(p.xy - vec2(0, e), 5) - terrainH(p.xy + vec2(0, e), 5), 2.0 * e));
-    vec2 ll = lonlat(p.xy);
-    vec2 tuv = vec2((ll.x + 180.0) / 360.0, (90.0 - ll.y) / 180.0);
-    vec3 alb = pow(texture(u_day, tuv).rgb, vec3(2.2));
-    alb *= 0.75 + 0.5 * fbm2(p.xy * 1.7, 4);
-    alb = mix(alb, vec3(0.8, 0.83, 0.87), u_snow * smoothstep(0.35, 0.75, n.z));
-    float sh = texture(u_shadow, p.xy / u_shadowSpan + 0.5).r;
-    vec3 Ls = lightColor(p.z + u_elev) * max(dot(n, u_light), 0.0) * sh;
-    vec3 amb = mix(u_ambBot, u_ambTop, 0.5 + 0.5 * n.z) * 0.9;
-    col = alb * (Ls + amb);
-    // city lights at night
-    // city lights at night: warm points scattered through the lit area, not a glowing sheet
-    float lit = pow(texture(u_nightTex, tuv).r, 2.2);
-    float pts = smoothstep(0.58, 0.82, fbm2(p.xy * 9.0, 3)) * (0.4 + 0.6 * smoothstep(0.3, 0.7, fbm2(p.xy * 1.3 + 7.0, 2)));
-    col += vec3(1.0, 0.62, 0.32) * lit * (0.004 + 0.12 * pts) * u_night;
+    col = hazed(col, ro, rd, tHit);
     depth = tHit;
   } else {
-    col = skyColor(rd) + discs(rd);
-    depth = u_far;
-  }
-  // aerial perspective: boundary-layer haze and air between the camera and the hit
-  if (tHit > 0.0) {
-    float f = 1.0 - exp(-hazeDepth(ro, rd, tHit));
-    vec3 haze = skyColor(normalize(vec3(rd.xy, max(rd.z, 0.02))));
-    col = mix(col, haze, f);
+    tHit = demTrace(ro, rd, max(tCut, 0.0), u_far, u_pix);
+    if (tHit > 0.0) { col = groundColor(ro, rd, tHit); depth = tHit; }
+    else {
+      col = skyColor(rd) + discs(rd);
+      depth = u_far;
+      // a skyline this ray cleared by less than a pixel covers part of the pixel: no stair-steps against the
+      // sky. Its colour is the slope facing the camera, a texel and a half short of the crest.
+      if (gEdgeCov > 0.0) {
+        float tEdge = gEdgeT, cov = gEdgeCov;
+        vec3 pc = ro + rd * tEdge;
+        float back = 3.0 * u_demHalf[demLayer(pc.xy)] / u_demInfo.x;
+        col = mix(col, groundColor(ro, rd, max(tEdge - back, tEdge * 0.5)), cov);
+        if (cov > 0.5) depth = tEdge;
+      }
+    }
   }
   o = vec4(col, 1.0);
   oDepth = vec4(depth, 0.0, 0.0, 1.0);
@@ -807,8 +1024,10 @@ void main() {
       }
     }
   }
-  // aerial perspective over the clouds
-  float dc = wAcc > 1e-4 ? dAcc / wAcc : u_far;
+  // aerial perspective over the clouds. (Where there is none the distance is the ground's behind it, not
+  // "infinitely far": scaled up next to real cloud, that would haze the cloud's edge to sky brightness and
+  // draw a bright rim along every ridge standing in front of a storm.)
+  float dc = wAcc > 1e-4 ? dAcc / wAcc : min(tScene, u_far);
   o = vec4(L, T);
   oEx = vec4(dc, halo, bow, 1.0);
 }`;
@@ -887,11 +1106,25 @@ vec3 ring(float ang, vec3 r0, float w) {
   return exp(-d * d);
 }
 
-// clouds upsampled with a little smarts: 4 taps weighted by depth agreement
-vec4 cloudAt(vec2 uv, out vec4 ex) {
-  vec4 c = texture(u_cloud, uv);
-  ex = texture(u_cloudEx, uv);
-  return c;
+// The clouds are drawn smaller than the screen, each of their texels marched as far as the ground at its
+// centre. Where the ground's outline crosses a texel (a ridge against a cloud deck) plain filtering would
+// smear cloud over the ridge and leave a blocky gap around it, so there the four nearest texels are weighed
+// by how well the ground they saw agrees with the ground at this pixel.
+vec4 cloudAt(vec2 uv, float sceneT, out vec4 ex) {
+  vec2 f = uv * u_cloudRes - 0.5;
+  vec2 i0 = floor(f), w = f - i0;
+  vec2 c00 = (i0 + 0.5) / u_cloudRes, c11 = (i0 + 1.5) / u_cloudRes;
+  vec4 d = vec4(texture(u_bgDepth, c00).r, texture(u_bgDepth, vec2(c11.x, c00.y)).r,
+                texture(u_bgDepth, vec2(c00.x, c11.y)).r, texture(u_bgDepth, c11).r);
+  vec4 r = abs(d - sceneT) / max(min(d, vec4(sceneT)), 0.1);
+  if (all(lessThan(r, vec4(0.03)))) { ex = texture(u_cloudEx, uv); return texture(u_cloud, uv); }
+  vec4 k = vec4((1.0 - w.x) * (1.0 - w.y), w.x * (1.0 - w.y), (1.0 - w.x) * w.y, w.x * w.y) / (1.0 + 900.0 * r * r) + 1e-6;
+  k /= k.x + k.y + k.z + k.w;
+  ivec2 lim = ivec2(u_cloudRes) - 1, a = clamp(ivec2(i0), ivec2(0), lim), b = clamp(ivec2(i0) + 1, ivec2(0), lim);
+  ex = k.x * texelFetch(u_cloudEx, a, 0) + k.y * texelFetch(u_cloudEx, ivec2(b.x, a.y), 0)
+     + k.z * texelFetch(u_cloudEx, ivec2(a.x, b.y), 0) + k.w * texelFetch(u_cloudEx, b, 0);
+  return k.x * texelFetch(u_cloud, a, 0) + k.y * texelFetch(u_cloud, ivec2(b.x, a.y), 0)
+       + k.z * texelFetch(u_cloud, ivec2(a.x, b.y), 0) + k.w * texelFetch(u_cloud, b, 0);
 }
 
 void main() {
@@ -900,7 +1133,7 @@ void main() {
   vec3 bg = texture(u_bg, uv).rgb;
   float sceneT = texture(u_bgDepth, uv).r;
   vec4 ex;
-  vec4 cl = cloudAt(uv, ex);
+  vec4 cl = cloudAt(uv, sceneT, ex);
   float T = cl.a;
   // distant cloud fades into the haze like the ground does
   vec3 hazeCol = sceneT >= u_far * 0.99 ? bg : u_ambTop * 1.25 + lightColor(1.0) * 0.06;

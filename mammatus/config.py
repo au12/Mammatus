@@ -71,6 +71,11 @@ class Settings:
     session_days: int = 30
     cache_gb: float = 10.0
     sky_cache_gb: float = 2.0
+    terrain_url: str | None = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+    terrain_tile_px: int = 256
+    terrain_max_zoom: int = 15
+    terrain_attribution: str | None = None
+    terrain_cache_gb: float = 1.0
     retention_hours: int = 54
     models: tuple[str, ...] = ALL_MODELS
     openmeteo_url: str = "https://api.open-meteo.com"
@@ -133,6 +138,16 @@ def load_settings() -> Settings:
     lightning = () if raw_lightning in ("off", "false", "none", "0") else tuple(
         s for s in ("east", "west") if s in {p.strip() for p in raw_lightning.split(",")}) or ("east", "west")
 
+    # real terrain for the Sky view: any Terrarium-encoded {z}/{x}/{y} tile server, or "off"
+    terrain_url = (_env("MAMMATUS_TERRAIN_URL", Settings.terrain_url) or "").strip()
+    if terrain_url.lower() in ("off", "false", "none", "0") or not all(k in terrain_url for k in ("{z}", "{x}", "{y}")):
+        if terrain_url.lower() not in ("off", "false", "none", "0"):
+            log.warning("Ignoring MAMMATUS_TERRAIN_URL without {z}/{x}/{y} placeholders: %r", terrain_url)
+        terrain_url = None
+    terrain_tile_px = _int("MAMMATUS_TERRAIN_TILE_SIZE", 256)
+    if terrain_tile_px not in (256, 512):
+        terrain_tile_px = 256
+
     public_url = _env("MAMMATUS_PUBLIC_URL")
     if public_url:
         public_url = public_url.rstrip("/")
@@ -147,6 +162,11 @@ def load_settings() -> Settings:
         session_days=max(1, _int("MAMMATUS_SESSION_DAYS", 30)),
         cache_gb=max(0.5, _float("MAMMATUS_CACHE_GB", 10.0)),
         sky_cache_gb=max(0.2, _float("MAMMATUS_SKY_CACHE_GB", 2.0)),
+        terrain_url=terrain_url,
+        terrain_tile_px=terrain_tile_px,
+        terrain_max_zoom=max(4, min(15, _int("MAMMATUS_TERRAIN_MAX_ZOOM", 15))),
+        terrain_attribution=_env("MAMMATUS_TERRAIN_ATTRIBUTION"),
+        terrain_cache_gb=max(0.05, _float("MAMMATUS_TERRAIN_CACHE_GB", 1.0)),
         retention_hours=max(12, _int("MAMMATUS_RETENTION_HOURS", 54)),
         models=models,
         openmeteo_url=(_env("MAMMATUS_OPENMETEO_URL", "https://api.open-meteo.com") or "").rstrip("/"),

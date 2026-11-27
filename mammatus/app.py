@@ -40,6 +40,7 @@ from .data.satellite import SatelliteService
 from .data.lightning import LightningService
 from .data.fronts import FrontsService
 from .data.sky import SkyService
+from .data.terrain import TerrainService, TileSource
 from .db import get_db
 from .events import EventHub
 from .security import RateLimiter, client_ip, request_host, request_scheme
@@ -184,10 +185,20 @@ async def _cleanup_loop(svc) -> None:
             loop = asyncio.get_running_loop()
             removed = await loop.run_in_executor(None, svc.frames.cache.cleanup, protected, settings.retention_hours)
             removed += await loop.run_in_executor(None, svc.sky.cleanup)
+            removed += await loop.run_in_executor(None, svc.terrain.cleanup)
             if removed:
                 log.info("cache cleanup freed %.1f MB", removed / 1e6)
         except Exception:
             log.exception("cache cleanup failed")
+
+
+def terrain_source(cfg) -> TileSource | None:
+    """The elevation tile server for the Sky view's terrain, or None when it is turned off."""
+    if not cfg.terrain_url:
+        return None
+    default = TileSource()
+    credit = cfg.terrain_attribution or (default.attribution if cfg.terrain_url == default.url else "Custom elevation tiles")
+    return TileSource(cfg.terrain_url, cfg.terrain_tile_px, cfg.terrain_max_zoom, credit)
 
 
 @asynccontextmanager
@@ -221,6 +232,10 @@ async def lifespan(app: FastAPI):
         notifier=notifier, engine=engine, started=time.time(), models_enabled=set(m.id for m in runs.models),
         lightning=LightningService(settings.cache_dir, frames.pool, settings.lightning, settings.lightning_backfill_min),
         fronts=FrontsService(), sky=SkyService(frames, runs, om, settings.cache_dir, int(settings.sky_cache_gb * 1024**3)),
+        terrain=TerrainService(
+            settings.cache_dir, frames.pool,
+            terrain_source(settings),
+            int(settings.terrain_cache_gb * 1024**3)),
     )
     app.state.svc = svc
     background = os.environ.get("MAMMATUS_BACKGROUND", "1") != "0"  # tests turn polling off

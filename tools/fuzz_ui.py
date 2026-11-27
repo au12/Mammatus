@@ -7,7 +7,8 @@ going offline and hiding/showing the page. After every step it checks invariants
 
   - no uncaught exceptions or console errors
   - the camera is finite and in range, and no pointer is left stuck in the gesture tracker
-  - the renderer still draws when asked (and has not lost its context)
+  - the renderer still draws when asked (and has not lost its context); with the Sky view open, that view
+    draws instead, and its ground is sane
   - nothing invisible covers the map (a hidden popover swallowing gestures)
 
     python tools/demo_server.py --port 8099 &
@@ -44,6 +45,13 @@ INVARIANTS = r"""
   if (cam.zoom < 0.4 || cam.zoom > 13) out.push(`zoom out of range ${cam.zoom}`);
   if (Math.abs(cam.lat) > 89.5) out.push(`lat out of range ${cam.lat}`);
   if (app.renderer.lost) out.push("WebGL context lost");
+  const sky = app.sky;
+  if (sky && sky.isOpen) {
+    if (!(sky.relief >= 0 && sky.relief <= 1)) out.push(`sky relief = ${sky.relief}`);
+    if (sky.fails) out.push(`sky view failed to draw ${sky.fails} times`);
+    if (!Number.isFinite(sky.groundAt(0, 0)) || !Number.isFinite(sky.groundAt(-200, 120))) out.push("sky ground is not finite");
+    if (sky.r && sky.r.lost) out.push("sky WebGL context lost");
+  }
   const c = app.controls;
   if (c && c.pointers.size && !window.__touching) out.push(`stuck pointers: ${c.pointers.size}`);
   // anything that takes pointer events over the map must be visible
@@ -68,7 +76,14 @@ INVARIANTS = r"""
 
 ALIVE = r"""
 async () => {
-  const r = window.mammatus.renderer;
+  const r = window.mammatus.renderer, sky = window.mammatus.sky;
+  if (sky && sky.isOpen && !sky.leaving) {
+    // the map is paused under the Sky view: that view must be the one drawing
+    const d0 = sky.lastDraw || 0;
+    sky.dirty = true; sky.kick();
+    for (let i = 0; i < 80; i++) { await new Promise((res) => setTimeout(res, 100)); if ((sky.lastDraw || 0) > d0 || !sky.isOpen) return true; }
+    return document.hidden;
+  }
   const f0 = r.frames;
   r.requestRender();
   for (let i = 0; i < 60; i++) { await new Promise((res) => setTimeout(res, 100)); if (r.frames > f0) return true; }
@@ -314,11 +329,49 @@ class Fuzzer:
         self.page.wait_for_timeout(300)
         self.click_any(".pointcard button")
 
+    def a_sky(self):
+        # the Sky view: open it somewhere, look around, change place and mode, leave
+        rng = self.rng
+        if not self.page.evaluate("!!window.mammatus.sky.isOpen"):
+            lat, lon = rng.choice([(35.6, -82.55), (39.74, -104.99), (21.31, -157.86), (rng.uniform(-70, 70), rng.uniform(-180, 180))])
+            self.page.evaluate(f"window.mammatus.openSky({{ lat: {lat:.3f}, lon: {lon:.3f}, name: 'fuzz' }})")
+            self.page.wait_for_timeout(rng.randint(200, 2500))
+            return
+        what = rng.choice(["mode", "zoom", "drag", "point", "point", "key", "exit"])
+        if what == "mode":
+            self.page.keyboard.press("g")
+        elif what == "zoom":
+            self.page.mouse.move(*self.map_point())
+            self.page.mouse.wheel(0, rng.choice([-900, -300, 300, 900]))
+        elif what == "drag":
+            self.a_drag()
+        elif what == "point":
+            lat, lon = rng.uniform(-84, 84), rng.uniform(-180, 180)
+            self.page.evaluate(f"window.mammatus.sky.setPoint({{ lat: {lat:.3f}, lon: {lon:.3f}, name: 'fuzz' }})")
+        elif what == "key":
+            self.page.keyboard.press(rng.choice(["+", "-", "ArrowLeft", "ArrowRight", "g"]))
+        else:
+            self.page.keyboard.press("Escape")
+        self.page.wait_for_timeout(rng.randint(100, 1500))
+
     def a_api_junk(self):
         # in-page APIs fed junk: decoders, labels, lightning sync, camera math
         self.page.evaluate(r"""async () => {
           const app = window.mammatus, rnd = Math.random;
           const junk = () => [NaN, Infinity, -Infinity, 1e308, -1e308, 0, -0, null, undefined, "x", {}, []][Math.floor(rnd() * 12)];
+          const { decodePatch } = await import("/js/sky/terrain.js");
+          for (let i = 0; i < 12; i++) {
+            const n = Math.floor(rnd() * 4096);
+            const b = new Uint8Array(n); crypto.getRandomValues(b);
+            if (n > 64) {
+              b.set([0x4d, 0x4d, 0x54, 0x31]);          // a terrain patch header with a made-up body
+              const head = new TextEncoder().encode(JSON.stringify({ size: [0, 64, 63, 1 << 20, -4, "x"][Math.floor(rnd() * 6)], half: [16, 64, 256], elev: junk() }));
+              new DataView(b.buffer).setUint32(4, rnd() < 0.5 ? head.length : Math.floor(rnd() * 9000), true);
+              b.set(head.subarray(0, Math.min(head.length, n - 8)), 8);
+            }
+            try { decodePatch(b.buffer); } catch (e) { /* rejected cleanly */ }
+          }
+          if (app.sky) { app.sky.groundAt(junk(), junk()); }
           const { decodeChunk } = await import("/js/lightning.js");
           for (let i = 0; i < 20; i++) {
             const n = Math.floor(rnd() * 64);
@@ -341,7 +394,7 @@ class Fuzzer:
 
     ACTIONS = ["a_tap", "a_drag", "a_drag", "a_pinch", "a_wheel", "a_double_tap", "a_two_finger_tap", "a_quick_zoom",
                "a_long_press", "a_key", "a_picker", "a_picker", "a_layers", "a_layers", "a_timeline", "a_fab", "a_drawer",
-               "a_search", "a_resize", "a_offline", "a_hide", "a_hash", "a_pointcard", "a_api_junk"]
+               "a_search", "a_resize", "a_offline", "a_hide", "a_hash", "a_pointcard", "a_api_junk", "a_sky", "a_sky"]
 
 
 COOKIES: list = []

@@ -1,11 +1,12 @@
 // WebGL2 renderer for the Sky view, on its own canvas and context.
 //
 // Each frame: physical sky lookup (when the sun moves), cloud shadows on the ground, the background
-// (sky, sun, moon, stars, terrain) at full resolution, volumetric clouds at reduced resolution with a
+// (sky, sun, moon, stars, the real terrain) at full resolution, volumetric clouds at reduced resolution with a
 // jittered ray start, accumulated over frames and reprojected when the camera moves, then one
 // composite pass (light shafts, halos, rainbows, lightning glow, tone mapping, dither) and the bolts.
 import { compile, loadImage } from "../engine/gl.js";
 import * as S from "./shaders.js";
+import { Terrain, HALF } from "./terrain.js";
 
 export const N = 40, NZ = 64;
 const HALTON = [[0.5, 0.333], [0.25, 0.667], [0.75, 0.111], [0.125, 0.444], [0.625, 0.778], [0.375, 0.222], [0.875, 0.556], [0.0625, 0.889]];
@@ -111,7 +112,9 @@ export class SkyRenderer {
     this.boltBuf = gl.createBuffer();
     this.tex.wind = this._tex2D(NZ, 1, gl.RGBA16F, gl.RGBA, gl.FLOAT, new Float32Array(NZ * 4));
     this.tex.sunLUT = this._tex2D(64, 1, gl.RGBA16F, gl.RGBA, gl.FLOAT, new Float32Array(64 * 4).fill(1));
-    this.tex.terrain = this._tex2D(N, N, gl.R16F, gl.RED, gl.FLOAT, new Float32Array(N * N));
+    // level ground until the first terrain arrives
+    const flat = new Terrain({ size: 64, layers: HALF.map(() => new Float32Array(64 * 64)) });
+    this.setDem(flat, flat.pyramids());
     const blank = { vol: new Uint8Array(NZ * N * N * 4), aux: new Uint8Array(NZ * N * N * 4), anvil: new Float32Array(N * N * 2) };
     this.empty = this._upload(blank);
     const px = this._tex2D(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([40, 60, 40, 255]));
@@ -266,7 +269,41 @@ export class SkyRenderer {
 
   setWind(arr) { this._sub(this.tex.wind, NZ, 1, this.gl.RGBA, arr); }
   setSunLUT(arr) { this._sub(this.tex.sunLUT, 64, 1, this.gl.RGBA, arr); }
-  setTerrain(arr) { this._sub(this.tex.terrain, N, N, this.gl.RED, arr); this.shadowDirty = true; }
+
+  // The ground: three nested grids in one array texture, each with its chain of (mean, highest) mips.
+  setDem(terrain, pyramids) {
+    const gl = this.gl, S = terrain.size;
+    if (!this.tex.dem || this.demSize !== S) {
+      if (this.tex.dem) gl.deleteTexture(this.tex.dem);
+      this.tex.dem = gl.createTexture();
+      this.demSize = S;
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.tex.dem);
+      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, terrain.levels, gl.RG16F, S, S, pyramids.length);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.tex.dem);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    pyramids.forEach((chain, k) => chain.forEach((m, level) => {
+      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, level, 0, 0, k, m.w, m.w, 1, gl.RG, gl.FLOAT, m.data);
+    }));
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    this.dem = { size: S, levels: terrain.levels, min: terrain.min, max: terrain.max, base: terrain.base, sea: terrain.sea };
+    this.shadowDirty = true;
+    this.reset = true;
+  }
+
+  _demUniforms(p, s) {
+    const gl = this.gl, u = p.uniforms, d = this.dem, g = s.ground || {};
+    this._bind(p, "u_dem", this.tex.dem, gl.TEXTURE_2D_ARRAY);
+    gl.uniform3f(u.u_demHalf, HALF[0], HALF[1], HALF[2]);
+    gl.uniform4f(u.u_demInfo, d.size, d.levels, g.relief ?? 1, g.curve ?? 0);
+    gl.uniform3f(u.u_demRange, d.min, d.max, d.base);
+    if (u.u_demSea) gl.uniform1f(u.u_demSea, d.sea);
+    if (u.u_demSteps) gl.uniform1i(u.u_demSteps, this.lowPower ? 160 : 256);     // a cap few rays come near (typically 11)
+  }
   _sub(t, w, h, fmt, arr) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -340,6 +377,7 @@ export class SkyRenderer {
     if (u.u_elev) gl.uniform1f(u.u_elev, e.elev);
     if (u.u_lat0) gl.uniform2f(u.u_lat0, e.lat, e.lon);
     if (u.u_hazeK) gl.uniform1f(u.u_hazeK, s.cam.hazeK ?? 1);
+    if (u.u_hazeLow) gl.uniform1f(u.u_hazeLow, e.hazeLow ?? 1);
     if (u.u_cut) gl.uniform4fv(u.u_cut, s.cam.cut);
     if (u.u_slab) gl.uniform2fv(u.u_slab, s.cam.slab || [1e4, 1]);
     this._bind(p, "u_sunLUT", this.tex.sunLUT);
@@ -395,7 +433,7 @@ export class SkyRenderer {
       gl.viewport(0, 0, this.shadow.w, this.shadow.h);
       this._common(p, s);
       this._cloudUniforms(p, s);
-      this._bind(p, "u_terrain", this.tex.terrain);
+      this._demUniforms(p, s);
       gl.uniform2f(p.uniforms.u_size, this.shadow.w, this.shadow.h);
       gl.uniform1f(p.uniforms.u_span, this.shadowSpan);
       this._quad(p);
@@ -411,8 +449,9 @@ export class SkyRenderer {
       this._common(p, s);
       const u = p.uniforms;
       gl.uniform2f(u.u_res, this.W, this.H);
+      gl.uniform1f(u.u_pix, s.cam.fov / this.H);
       this._bind(p, "u_skyLUT", this.skyLUT.tex[0]);
-      this._bind(p, "u_terrain", this.tex.terrain);
+      this._demUniforms(p, s);
       this._bind(p, "u_day", this.tex.day);
       this._bind(p, "u_nightTex", this.tex.night);
       this._bind(p, "u_shadow", this.shadow.tex[0]);

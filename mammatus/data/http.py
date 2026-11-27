@@ -24,6 +24,7 @@ HOST_LIMITS = {
     "api.open-meteo.com": 4,
     "api.weather.gov": 4,
     "realearth.ssec.wisc.edu": 4,
+    "s3.amazonaws.com": 12,           # terrain tiles: many small files
 }
 DEFAULT_HOST_LIMIT = 8
 
