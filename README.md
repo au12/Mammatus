@@ -33,11 +33,12 @@ family can use it from anywhere.
 - **Live radar & satellite.** MRMS composite reflectivity every few minutes; global IR / visible / water
   vapor mosaics that also appear as live clouds on the globe.
 - **Lightning.** Every flash seen by the GOES-East and GOES-West Geostationary Lightning Mappers, about a
-  minute behind real time. Strikes replay in their true rhythm: each one flickers through its return
-  strokes, blooms softly and leaves a faint ring, then cools from white to crimson as it ages. In busy
-  storms only a few strikes per second flash, so it stays a gentle shimmer rather than strobing. Step
-  or play a radar or satellite loop and the lightning that led up to each frame flashes along with it.
-  Tap anywhere for the nearest strike ("Lightning 6 mi away · 3 min ago").
+  minute behind real time, drawn as lightning bolts: the newest are the biggest and white-hot, and they
+  shrink and cool through gold and amber to crimson over half an hour. New strikes flash as they happen,
+  flickering through their return strokes with a bloom and a ring. When storms come into view, their
+  bolts flash in the order they struck, and the replay comes back every half minute so active cells
+  stay easy to spot. Step or play a radar or satellite loop and the lightning that led up to each
+  frame flashes along with it. Tap anywhere for the nearest strike ("Lightning 6 mi away · 3 min ago").
 - **Fronts.** NOAA WPC's hand-drawn surface analysis (every 3 hours) and its 12–48 hour forecast fronts,
   matched to the timeline: cold, warm, stationary and occluded fronts with proper symbols, troughs, and
   WPC highs and lows when the map isn't already showing model pressure centers.
@@ -53,9 +54,12 @@ family can use it from anywhere.
 - **Accounts.** Invite-only users, admin and user roles, TOTP two-step verification, session management,
   password resets by link, an audit log.
 - **Installable PWA.** Home-screen app on iOS and Android, offline shell, deep links from notifications.
-- **Easy on batteries.** Nothing renders unless something changes; animation idles after 20 s on phones,
-  caps at 30 fps in battery-saver mode and stops entirely in the background. Live updates disconnect when
-  the app is hidden. Frames are compact (quantized, delta-coded, gzip) and cached immutably.
+- **Smooth and easy on batteries.** Labels and map symbols are drawn on the GPU, pixel-snapped and placed
+  with hysteresis, so nothing flickers or jumps while you pan. Nothing renders unless something changes;
+  the globe and data field are cached so lightning and wind frames redraw only what moves; animation
+  idles after 20 s on phones, caps at 30 fps in battery-saver mode and stops entirely in the background.
+  Live updates disconnect when the app is hidden. Frames are compact (quantized, delta-coded, gzip) and
+  cached immutably.
 
 ## Screenshots
 
@@ -64,7 +68,7 @@ family can use it from anywhere.
 | ![GFS pressure and precipitation type](docs/screenshots/desktop-mslp.jpg) | ![HRRR wind with animated flow](docs/screenshots/desktop-wind.jpg) |
 | GFS precipitation type with isobars and pressure centers | HRRR 10 m wind with animated particles |
 | ![GOES lightning over South America](docs/screenshots/desktop-lightning.jpg) | ![WPC fronts with GFS pressure](docs/screenshots/desktop-fronts.jpg) |
-| Live GOES lightning over the Amazon, with the infrared satellite | WPC fronts over GFS precipitation type and isobars |
+| Live GOES lightning over Mexico, the Andes and the Amazon, with the infrared satellite | WPC fronts over GFS precipitation type and isobars |
 | ![Regional view with point card](docs/screenshots/desktop-regional.jpg) | ![Skew-T sounding](docs/screenshots/desktop-sounding.jpg) |
 | HRRR simulated radar at county level, tap for details | Skew-T and indices (demo profile) |
 
@@ -154,8 +158,8 @@ for an Nginx Proxy Manager walkthrough and the security model.
 - **Frontend:** dependency-free ES modules and a custom WebGL2 renderer: an analytic globe/Mercator
   projection with exact inverse per pixel, data textures sampled in-shader on the model's native grid
   (lat/lon or Lambert conformal), perceptual OKLab color ramps, GPU particle advection with transform
-  feedback, instanced anti-aliased lines, Web Workers for decoding and contouring. The whole app is
-  about 55 kB gzipped.
+  feedback, instanced anti-aliased lines, GPU text from a sprite atlas, signed-distance-field symbols,
+  Web Workers for decoding and contouring. The whole app is about 105 kB gzipped.
 
 ## Development
 
@@ -165,6 +169,15 @@ MAMMATUS_DATA_DIR=./data python -m mammatus          # serves mammatus/static (u
 cd tools && npm install && npm run build              # production bundle -> mammatus/static-dist
 pytest -q
 ```
+
+No network or model data needed for UI work: `python tools/demo_server.py --port 8099` serves the app
+with synthetic models, radar, satellite, lightning, fronts and warnings (sign in as `demo` /
+`synthetic-weather-42`).
+
+Fuzzing: `MAMMATUS_FUZZ=20000 pytest tests/test_fuzz.py` runs the parser, rule-engine and API fuzzers
+deeper (`MAMMATUS_FUZZ_SEED` picks the seed), and `python tools/fuzz_ui.py --runs 5` drives random
+desktop and mobile sessions against the demo server with Playwright, checking that the map keeps
+rendering, gestures still reach the map and nothing throws.
 
 Basemap, star and texture assets are prebuilt in `mammatus/static/data` and `mammatus/static/img`
 (`tools/fetch_sources.sh`, `tools/build_assets.mjs`, `tools/build_textures.py` regenerate them);

@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/au12/Mammatus/issues</Support>
   <Project>https://github.com/au12/Mammatus</Project>
-  <Overview>Mammatus is a self-hosted weather model viewer. HRRR, RRFS, GFS, ECMWF IFS and AIFS maps on a realistic 3D globe that morphs into a flat map, with live radar and satellite, GOES lightning with animated strikes, WPC fronts, NWS alerts, multi-model meteograms, skew-T soundings, user accounts and real push notifications. Put it behind your reverse proxy (HTTPS) for remote access and install it as an app on phones.&#xD;
+  <Overview>Mammatus is a self-hosted weather model viewer. HRRR, RRFS, GFS, ECMWF IFS and AIFS maps on a realistic 3D globe that morphs into a flat map, with live radar and satellite, GOES lightning drawn as animated bolts, WPC fronts, NWS alerts, multi-model meteograms, skew-T soundings, user accounts and real push notifications. Put it behind your reverse proxy (HTTPS) for remote access and install it as an app on phones.&#xD;
 &#xD;
 First run: open the WebUI and use the one-time setup code printed in the container log, or set MAMMATUS_ADMIN_USER / MAMMATUS_ADMIN_PASSWORD.</Overview>
   <Category>Tools: Productivity: Other:</Category>
