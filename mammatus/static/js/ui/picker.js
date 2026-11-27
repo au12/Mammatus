@@ -35,6 +35,7 @@ export class Picker {
     if (s.type === "model") {
       const p = app.catalog.products.find((x) => x.id === s.product);
       const m = app.model(s.model);
+      if (!p || !m) { b.textContent = p?.name || "Layer"; sub.textContent = m?.short || ""; return; }
       const cm = app.catalog.colormaps[p.cmap];
       sw.style.background = cm.mode === "category" ? `linear-gradient(135deg, ${cssGradient(cm).join(", ")})` : cssGradient(cm).replace("90deg", "135deg");
       b.textContent = p.name;

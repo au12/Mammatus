@@ -3,7 +3,6 @@ import { h, $, isMobile, isTouch, debounce, throttle, hashParams, setHash, haver
 import * as API from "./api.js";
 import { Renderer } from "./engine/renderer.js";
 import { Controls } from "./engine/controls.js";
-import { Overlay } from "./engine/overlay.js";
 import { decodeBoundaries, decodeStars } from "./data/basemap.js";
 import { loadImage } from "./engine/gl.js";
 import { Layers } from "./layers.js";
@@ -23,14 +22,17 @@ import { AlertsLayer } from "./alerts-layer.js";
 import { Lightning } from "./lightning.js";
 import { Fronts } from "./fronts.js";
 import * as pwa from "./pwa.js";
+import { sanitizePrefs } from "./prefs.js";
 
 const splashMsg = (t) => { const m = $("#splash .msg"); if (m) m.textContent = t; };
 const VIEW_KEY = "mm.view";
 
 class App {
-  constructor(user) {
+  constructor(user, { safe = false } = {}) {
     this.user = user;
-    this.prefs = { ...(user.prefs || {}) };
+    this.prefs = sanitizePrefs(user.prefs);
+    // safe mode (after a failed start): leave out the saved layer, view mode and position
+    if (safe) { delete this.prefs.lastSource; delete this.prefs.mode; this.safe = true; }
     this.state = { source: null };
     this.points = [];
     this.runs = {};
@@ -65,7 +67,7 @@ class App {
     this.basemap(decodeBoundaries(bnd));
     this.cities = cities.map(([name, adm, cc, lat, lon, pop, rank]) => ({ name, adm, cc, lat, lon, pop, rank }));
 
-    this.overlay = new Overlay($("#overlay"), r);
+    this.overlay = r.labels;
     this.overlay.setCities(cities);
     this.overlay.setPoints(this.points);
     this.layers = new Layers(this);
@@ -104,40 +106,48 @@ class App {
     const line = (id, color, width, z, minZoom = -9, extra = {}) => r.setLines(`base:${id}`, b[id], { color, width, z, minZoom, halo: 0.6, haloColor: [0, 0, 0, 0.35], ...extra });
     line("coast", [0.86, 0.9, 1, 0.55], 1.0, 1);
     line("countries", [0.86, 0.9, 1, 0.48], 0.95, 2);
-    line("provinces", [0.86, 0.9, 1, 0.28], 0.7, 2, 3);
+    // faint lines skip the halo pass: it was invisible under them and doubled their vertex work
+    line("provinces", [0.86, 0.9, 1, 0.28], 0.7, 2, 3, { halo: 0 });
     line("states", [0.86, 0.9, 1, 0.5], 0.9, 2, 2.6);
-    line("lakes", [0.86, 0.9, 1, 0.35], 0.7, 2, 3);
-    line("counties", [0.86, 0.9, 1, 0.16], 0.6, 1, 5.6);
+    line("lakes", [0.86, 0.9, 1, 0.35], 0.7, 2, 3, { halo: 0 });
+    line("counties", [0.86, 0.9, 1, 0.16], 0.6, 1, 5.6, { halo: 0 });
     if (this.prefs.counties === false) r.setLineStyle("base:counties", { visible: false });
   }
 
   restoreView() {
     const cam = this.renderer.camera;
-    cam.mode = this.prefs.mode || "auto";
+    cam.mode = ["globe", "auto", "map"].includes(this.prefs.mode) ? this.prefs.mode : "auto";
     let v = null;
-    try { v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null"); } catch { /* private mode */ }
-    if (v && this.prefs.rememberView !== false) { cam.lon = v.lon; cam.lat = v.lat; cam.zoom = v.zoom; }
+    try { v = this.safe ? null : JSON.parse(localStorage.getItem(VIEW_KEY) || "null"); } catch { /* private mode or junk */ }
+    const ok = v && [v.lon, v.lat, v.zoom].every(Number.isFinite);
+    if (ok && this.prefs.rememberView !== false) { cam.lon = v.lon; cam.lat = v.lat; cam.zoom = v.zoom; }
     else { cam.lon = -82.5; cam.lat = 34.5; cam.zoom = 1.5; this.introFly = true; }
+    cam.sanitize();
   }
 
   saveView = debounce(() => {
     const c = this.renderer.camera;
+    if (![c.lon, c.lat, c.zoom].every(Number.isFinite)) return;
     try { localStorage.setItem(VIEW_KEY, JSON.stringify({ lon: +c.lon.toFixed(3), lat: +c.lat.toFixed(3), zoom: +c.zoom.toFixed(2) })); } catch { /* ignore */ }
   }, 800);
 
   initialSource() {
-    const hp = hashParams();
+    const hp = this.safe ? new URLSearchParams() : hashParams();
     const last = this.prefs.lastSource;
     const models = this.catalog.models.map((m) => m.id);
     const pickRun = (m) => this.runs[m]?.[0]?.run;
+    // a product id from a link or an older version may not exist (or not for this model)
+    const productFor = (m, p) => (this.catalog.products.some((x) => x.id === p && x.models.includes(m)) ? p : "t2m");
     if (hp.get("m") && models.includes(hp.get("m"))) {
       const m = hp.get("m");
       const run = (this.runs[m] || []).find((x) => x.run === hp.get("r")) ? hp.get("r") : pickRun(m);
-      return { source: { type: "model", model: m, run, product: hp.get("p") || "t2m", pinned: hp.get("r") === run && run !== pickRun(m) }, fhr: hp.get("f") != null ? +hp.get("f") : null };
+      const f = hp.get("f") != null ? Number(hp.get("f")) : null;
+      if (run) return { source: { type: "model", model: m, run, product: productFor(m, hp.get("p")), pinned: hp.get("r") === run && run !== pickRun(m) }, fhr: Number.isInteger(f) ? f : null };
     }
-    if (last?.type === "radar" || last?.type === "sat") return { source: last };
+    if (last?.type === "radar") return { source: { type: "radar" } };
+    if (last?.type === "sat" && this.catalog.satellite.some((x) => x.id === last.product)) return { source: last };
     const m = last?.model && models.includes(last.model) && pickRun(last.model) ? last.model : models.find((x) => pickRun(x)) || models[0];
-    return { source: { type: "model", model: m, run: pickRun(m), product: last?.product || "t2m" } };
+    return { source: { type: "model", model: m, run: pickRun(m), product: productFor(m, last?.product) } };
   }
 
   model(id) { return this.catalog.models.find((m) => m.id === id); }
@@ -206,14 +216,17 @@ class App {
     const render = () => {
       const cam = r.camera;
       const modeSeg = h("div", { class: "seg", style: { width: "100%", marginBottom: "6px" } }, ...[["globe", "Globe"], ["auto", "Auto"], ["map", "Flat map"]].map(([m, l]) =>
-        h("button", { class: cam.mode === m ? "sel" : "", style: { flex: 1 }, onclick: () => { this.setMode(m); render(); } }, l)));
+        h("button", { class: cam.mode === m ? "sel" : "", style: { flex: 1 }, onclick: () => {
+          this.setMode(m);
+          if (this.mobile()) { menu.classList.remove("open"); this._offMenu?.(); } else render();
+        } }, l)));
       menu.replaceChildren(h("div", { style: { padding: "6px 6px 4px" } }, modeSeg),
         row("alert", "Weather alerts", "NWS warnings and advisories", "alerts", true, (v) => this.alerts.setEnabled(v)),
         row("bolt", "Lightning", "Live GOES satellite strikes; follows radar loops", "lightning", false, (v) => this.setLightning(v)),
         row("front", "Fronts", "WPC analysis and 48-hour forecast fronts", "fronts", false, (v) => this.setFronts(v)),
         row("cloud", "Live clouds", "Latest satellite clouds on the globe", "liveClouds", true, (v) => (v ? this.loadLiveClouds() : this.clearLiveClouds())),
         row("wind", "Wind animation", "Flowing particles on wind layers", "particles", true, () => this.layers.show(this.layers.index, { crossfade: false })),
-        row("pin", "Place labels", "Cities and towns", "cities", true, (v) => { this.overlay.showCities = v; this.overlay.touch(); }),
+        row("pin", "Place labels", "Cities and towns", "cities", true, (v) => this.overlay.setShowCities(v)),
         row("map", "County lines", "When zoomed in", "counties", true, (v) => r.setLineStyle("base:counties", { visible: v })),
         row("globe", "Realistic earth", "Satellite imagery, night lights, atmosphere", "realistic", true, (v) => { r.look.realism = v ? 1 : 0; r.look.styled = v ? 0 : 1; r.requestRender(); }));
       if (pwa.canInstall() && !pwa.isStandalone()) menu.append(h("button", { class: "lrow", onclick: () => pwa.install() }, h("span", { html: icon("download", 18) }), h("span", { class: "tt" }, h("b", {}, "Install app"), h("small", {}, "Full screen, faster start, notifications"))));
@@ -226,12 +239,13 @@ class App {
         menu.style.top = `${b.bottom + 8}px`;
         menu.style.left = `${Math.max(8, Math.min(innerWidth - 298, b.right - 290))}px`;
         menu.style.transformOrigin = "top right";
+        this._offMenu?.();
         this._offMenu = onOutside(menu, () => { menu.classList.remove("open"); this._offMenu?.(); }, [btn]);
       } else this._offMenu?.();
       menu.classList.toggle("open", open);
     });
     if (this.prefs.realistic === false) { r.look.realism = 0; r.look.styled = 1; }
-    if (this.prefs.cities === false) this.overlay.showCities = false;
+    if (this.prefs.cities === false) this.overlay.setShowCities(false);
   }
 
   renderModeBtn() {
@@ -257,7 +271,7 @@ class App {
 
   zoomBy(dz) {
     const cam = this.renderer.camera;
-    cam.flyTo({ lon: cam.lon, lat: cam.lat, zoom: cam.zoom + dz }, 380);
+    cam.zoomAt(cam.w / 2, cam.h / 2, dz, 320);
     this.renderer.poke();
   }
 
@@ -403,8 +417,11 @@ class App {
       if (hoverRaf) return;
       hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; this.hover(hoverPt); });
     });
+    c.addEventListener("doubletap", (e) => { cam.zoomAt(e.detail.x, e.detail.y, 1, 300); r.poke(); });
+    c.addEventListener("zoomout", (e) => { cam.zoomAt(e.detail.x, e.detail.y, -1, 300); r.poke(); });
     c.addEventListener("move", () => { this.readout.classList.remove("on"); if (this.introFly) this.introFly = false; this.lightning?.wake(); });
     c.addEventListener("tap", () => this.lightning?.wake());
+    this.controls = c;
     // settle detection: any camera change, debounced
     let lastV = -1;
     const settled = debounce(() => {
@@ -662,6 +679,8 @@ class App {
   // ------------------------------------------------------------------ deep links & hash state
   handleDeepLink(params = null) {
     const hp = params || hashParams();
+    // a link that picks the view wins over the first-visit fly-in, which is still on a timer at startup
+    if (["point", "alert", "ll"].some((k) => hp.has(k))) this.introFly = false;
     if (hp.get("point")) {
       const p = this.points.find((x) => x.id === +hp.get("point"));
       if (p) this.selectPoint({ ...p }, { fly: true, tab: hp.get("tab") === "meteogram" ? "forecast" : hp.get("tab") || "forecast" });
@@ -676,7 +695,15 @@ class App {
       if (this.model(m)) this.setSource({ type: "model", model: m, run: hp.get("run"), product: this.state.source?.product || "t2m", pinned: true });
     } else if (hp.get("ll")) {
       const [lat, lon, z] = hp.get("ll").split(",").map(Number);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) { const cam = this.renderer.camera; cam.lon = lon; cam.lat = lat; if (z) cam.zoom = z; cam.changed(); this.renderer.poke(); }
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        const cam = this.renderer.camera;
+        cam.cancelAnimation();
+        cam.setCenter(lon, lat);
+        if (Number.isFinite(z)) cam.zoom = cam.clampZoom(z);
+        cam.sanitize();
+        cam.changed();
+        this.renderer.poke();
+      }
       return;
     } else return;
     this._skipHash = 0;
@@ -780,11 +807,22 @@ async function start() {
     const s = $("#splash");
     if (s) { s.classList.remove("gone"); }
   }
-  const app = new App(state.user);
+  let safe = false;
+  try { safe = sessionStorage.getItem("mm.safe") === "1"; } catch { /* storage blocked */ }
+  const app = new App(state.user, { safe });
   window.mammatus = app;
-  try { await app.boot(); } catch (err) {
+  try {
+    await app.boot();
+    try { sessionStorage.removeItem("mm.safe"); } catch { /* ignore */ }
+  } catch (err) {
     console.error(err);
-    splashMsg(/WebGL/.test(err.message) ? "This browser can't run WebGL2, which Mammatus needs for the globe." : `Couldn't start: ${err.message}`);
+    const webgl = /WebGL/.test(err.message);
+    // one automatic retry without the saved layer, view and position, which are what a bad
+    // saved state or link usually comes down to
+    if (!webgl && !safe) {
+      try { sessionStorage.setItem("mm.safe", "1"); history.replaceState(null, "", location.pathname); location.reload(); return; } catch { /* fall through */ }
+    }
+    splashMsg(webgl ? "This browser can't run WebGL2, which Mammatus needs for the globe." : `Couldn't start: ${err.message}`);
   }
 }
 
