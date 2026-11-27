@@ -52,6 +52,19 @@ export class FrameStore {
     this.maxActive = 4;
     this.waiting = [];
     this.bytesFetched = 0;
+    this.pins = new Map();   // owner -> Set of keys the renderer is drawing from right now
+  }
+
+  // Entries on screen (the field, the frame it is cross-fading from, the wind under the particles)
+  // must survive eviction: deleting their textures mid-draw shows up as a black or glitching map.
+  pin(owner, entries) {
+    const keys = new Set((entries || []).filter(Boolean).map((e) => e.key));
+    if (keys.size) this.pins.set(owner, keys); else this.pins.delete(owner);
+  }
+
+  pinned(key) {
+    for (const set of this.pins.values()) if (set.has(key)) return true;
+    return false;
   }
 
   has(key) { return this.cache.has(key); }
@@ -112,25 +125,33 @@ export class FrameStore {
     this.bytesFetched += buf.byteLength;
     const res = await this.pool.run({ buf, contour: opts.contour || null }, [buf]);
     const header = res.header;
-    const comps = res.comps.map((b) => new Uint16Array(b));
-    const entry = { key, header, comps, tex: null, bytes: comps.reduce((s, c) => s + c.byteLength * 2, 0) };
+    if (!header || !Number.isInteger(header.w) || !Number.isInteger(header.h) || !Array.isArray(res.comps)) throw new Error("bad frame");
+    let comps = res.comps.map((b) => new Uint16Array(b));
+    let bytes = comps.reduce((s, c) => s + c.byteLength * 2, 0);  // CPU copy + GPU texture
+    const entry = { key, header, comps, tex: null, bytes };
     if (res.contour) {
       entry.contour = {
         lines: new Float32Array(res.contour.lines),
         labels: new Float32Array(res.contour.labels),
         hilo: res.contour.hilo ? new Float32Array(res.contour.hilo) : null,
       };
+      // a contour-only fetch never samples or draws the grid itself: keep just the lines
+      entry.comps = comps = [];
+      entry.bytes = entry.contour.lines.byteLength + entry.contour.labels.byteLength + (entry.contour.hilo?.byteLength || 0);
     }
     this._insert(entry);
     return entry;
   }
 
   _insert(entry) {
+    const old = this.cache.get(entry.key);
+    if (old && old !== entry) this.evict(entry.key);
     this.cache.set(entry.key, entry);
     this.used += entry.bytes;
-    while (this.used > this.budget && this.cache.size > 2) {
-      const [k, old] = this.cache.entries().next().value;
-      if (old.pinned) { this.cache.delete(k); this.cache.set(k, old); continue; }
+    if (this.used <= this.budget) return;
+    for (const k of [...this.cache.keys()]) {
+      if (this.used <= this.budget || this.cache.size <= 2) break;
+      if (k === entry.key || this.pinned(k)) continue;
       this.evict(k);
     }
   }
@@ -138,13 +159,14 @@ export class FrameStore {
   evict(key) {
     const e = this.cache.get(key);
     if (!e) return;
-    if (e.tex) this.gl.deleteTexture(e.tex);
+    if (e.tex) { this.gl.deleteTexture(e.tex); e.tex = null; }
     this.used -= e.bytes;
     this.cache.delete(key);
   }
 
   texture(entry) {
     if (!entry.tex) {
+      if (!entry.comps?.length) return null;
       const { w, h } = entry.header;
       let data = entry.comps[0];
       if (entry.comps.length === 2) {

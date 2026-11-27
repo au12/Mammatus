@@ -46,8 +46,8 @@ function general(app, p) {
   p.append(h("h4", {}, "Time"), field("Time zone", tzSel, "Times across the app use this zone."));
   p.append(h("h4", {}, "Display"),
     toggleRow("Smooth transitions", "Cross-fade between forecast hours.", app.prefs.smooth !== false, (v) => app.savePref("smooth", v)),
-    toggleRow("Animate lightning", "New strikes flicker and glow. Off shows plain dots; also off when the system asks for reduced motion.", app.prefs.lightningAnim !== false, (v) => { app.savePref("lightningAnim", v); app.lightning.wake(); app.renderer.requestRender(); }),
-    toggleRow("Battery saver", "Lower resolution and fewer particles. On by default for phones.", app.renderer.lowPower, (v) => { app.savePref("lowPower", v); toast("Battery saver changes apply after reload", { action: { label: "Reload", fn: () => location.reload() } }); }),
+    toggleRow("Animate lightning", "Bolts flash as strikes happen, and replay in the order they happened when they come into view. Off shows still bolts; also off when the system asks for reduced motion.", app.prefs.lightningAnim !== false, (v) => { app.savePref("lightningAnim", v); app.lightning.wake(); app.renderer.requestRender(); }),
+    toggleRow("Battery saver", "Fewer wind particles, animation capped at 30 fps and sooner idle. On by default for phones.", app.renderer.lowPower, (v) => { app.savePref("lowPower", v); toast("Battery saver changes apply after reload", { action: { label: "Reload", fn: () => location.reload() } }); }),
     toggleRow("Remember map position", "Reopen where you left off.", app.prefs.rememberView !== false, (v) => app.savePref("rememberView", v)));
   const opacity = h("input", { type: "range", min: 40, max: 100, value: Math.round((app.prefs.opacity ?? 0.88) * 100), style: { width: "100%", accentColor: "#c3a8ff" } });
   opacity.addEventListener("input", () => { app.savePref("opacity", opacity.value / 100, true); app.applyOpacity(); });

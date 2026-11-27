@@ -131,14 +131,19 @@ vec3 bilin(highp usampler2D tex, vec2 ij, bool vec) {
   return vec3((x - 1.0) * u_qs.x + u_qs.y, vec ? (y - 1.0) * u_qs.x + u_qs.y : 0.0, 1.0);
 }
 
+// Position of v along the colormap stops (binary search: 5 steps instead of up to 31 per pixel).
 float stopT(float v) {
-  if (v <= u_stops[0]) return 0.0;
-  for (int i = 0; i < 31; i++) {
-    if (i + 1 >= u_nstops) break;
-    float a = u_stops[i], b = u_stops[i + 1];
-    if (v < b) return (float(i) + (v - a) / max(b - a, 1e-6)) / float(u_nstops - 1);
+  int n = u_nstops;
+  if (n < 2 || v <= u_stops[0]) return 0.0;
+  if (v >= u_stops[n - 1]) return 1.0;
+  int lo = 0, hi = n - 1;   // stops[lo] <= v < stops[hi]
+  for (int k = 0; k < 6; k++) {
+    if (hi - lo <= 1) break;
+    int mid = (lo + hi) / 2;
+    if (v < u_stops[mid]) hi = mid; else lo = mid;
   }
-  return 1.0;
+  float a = u_stops[lo], b = u_stops[hi];
+  return (float(lo) + (v - a) / max(b - a, 1e-6)) / float(n - 1);
 }
 
 vec4 lutColor(float v, float row) {
@@ -352,13 +357,14 @@ out vec2 v_px;
 uniform vec4 u_vp;
 void main() { v_px = a_pos * 0.5 * u_vp.xy; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 
-export const SKY_FS = /* glsl */ `#version 300 es
+// Bakes the Milky Way into an equirectangular texture in celestial coordinates (once).
+// Values are stored x8 so the darkest glows survive 8-bit storage.
+export const SKYBAKE_FS = /* glsl */ `#version 300 es
 precision highp float;
-${PROJ}
 in vec2 v_px;
 out vec4 o_color;
-uniform float u_gmst;
-uniform float u_fade;
+uniform vec4 u_vp;
+const float PI = 3.141592653589793;
 
 float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
 float noise(vec3 x) {
@@ -370,13 +376,9 @@ float noise(vec3 x) {
 float fbm(vec3 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }
 
 void main() {
-  vec3 d = normalize(vec3(v_px, -u_vp.z));
-  // camera frame -> earth-fixed (x: lon0 meridian, y: north) -> celestial
-  float s0 = sin(u_view.y), c0 = cos(u_view.y);
-  vec3 e = vec3(d.x, d.y * c0 + d.z * s0, -d.y * s0 + d.z * c0);
-  float lon = u_view.x + atan(e.x, e.z);
-  float lat = asin(clamp(e.y, -1.0, 1.0));
-  float ra = lon + u_gmst;
+  vec2 uv = v_px / u_vp.xy + 0.5;
+  float ra = (uv.x - 0.5) * 2.0 * PI;
+  float lat = (uv.y - 0.5) * PI;
   vec3 eq = vec3(cos(lat) * cos(ra), cos(lat) * sin(ra), sin(lat));
   // equatorial -> galactic (J2000)
   mat3 G = mat3(-0.0548756, 0.4941094, -0.8676661,
@@ -391,6 +393,27 @@ void main() {
   float glowN = fbm(g * 4.0);
   float mw = (band * (0.55 + 0.75 * glowN) + bulge * 1.4) * smoothstep(0.25, 0.75, dust + 0.15);
   vec3 col = vec3(0.006, 0.008, 0.016) + vec3(0.55, 0.56, 0.66) * mw * 0.06 + vec3(0.30, 0.20, 0.12) * bulge * 0.03;
+  o_color = vec4(min(col * 8.0, 1.0), 1.0);
+}`;
+
+export const SKY_FS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec2 v_px;
+out vec4 o_color;
+uniform float u_gmst;
+uniform float u_fade;
+uniform sampler2D u_sky;
+void main() {
+  vec3 d = normalize(vec3(v_px, -u_vp.z));
+  // camera frame -> earth-fixed (x: lon0 meridian, y: north) -> celestial
+  float s0 = sin(u_view.y), c0 = cos(u_view.y);
+  vec3 e = vec3(d.x, d.y * c0 + d.z * s0, -d.y * s0 + d.z * c0);
+  float lon = u_view.x + atan(e.x, e.z);
+  float lat = asin(clamp(e.y, -1.0, 1.0));
+  float ra = lon + u_gmst;
+  vec2 uv = vec2(fract(ra / TAU + 0.5), lat / PI + 0.5);
+  vec3 col = texture(u_sky, uv).rgb / 8.0;
   o_color = vec4(col * u_fade, 1.0);
 }`;
 
@@ -474,10 +497,10 @@ in float v_dist;
 in float v_hw;
 out vec4 o_color;
 uniform vec4 u_color;
-uniform vec2 u_dash;   // km on, km period (0 = solid)
+uniform vec3 u_dash;   // on, period, phase in the polyline's distance units (period 0 = solid)
 void main() {
   float a = clamp(v_hw + 0.5 - abs(v_side), 0.0, 1.0);
-  if (u_dash.y > 0.0 && mod(v_dist, u_dash.y) > u_dash.x) discard;
+  if (u_dash.y > 0.0 && mod(v_dist + u_dash.z, u_dash.y) > u_dash.x) discard;
   a *= u_color.a;
   if (a < 0.01) discard;
   o_color = vec4(u_color.rgb * a, a);
@@ -626,116 +649,287 @@ void main() {
   o_color = vec4(u_color.rgb * a, a);
 }`;
 
-// Lightning strikes: instanced quads. Dots are colored by age; a strike that has just happened
-// flickers (1-4 return strokes), blooms softly and sends out a faint ring. Glow terms are emitted
-// with alpha 0 so they add light under the premultiplied (ONE, ONE_MINUS_SRC_ALPHA) blend.
-export const STRIKE_VS = /* glsl */ `#version 300 es
+// Lightning: every strike is drawn as a bolt glyph (a signed-distance sprite), biggest for the newest
+// strikes and shrinking with age, colored white -> gold -> amber -> crimson across the window.
+// A bolt flashes when it happens live, when a stepped radar frame reveals it, or when a replay
+// sequence reaches it: replays run through the strikes in the order they happened, either revealing
+// them one by one (reveal) or re-flashing ones already on screen (pulse).
+// Glow terms are emitted with alpha 0 so they add light under the premultiplied blend.
+export const BOLT_VS = /* glsl */ `#version 300 es
 precision highp float;
 ${PROJ}
-in vec4 a_s;          // lon, lat (deg), time (s, relative to the layer's base), energy 0..1
-in float a_r;         // per-strike rank 0..1: strikes with a_r < u_animFrac get the flash
-in vec2 a_corner;     // -1..1
-uniform float u_tEnd;     // end of the visible window (same base as a_s.z)
-uniform float u_window;   // window length (s)
-uniform float u_mode;     // 0 live (age drives the flash), 1 stepped (flash spread over the step)
-uniform float u_prevT;    // stepped: start of the newly revealed interval
-uniform float u_wall;     // stepped: wall-clock seconds since the step
-uniform float u_spread;   // stepped: wall-clock seconds the new strikes are spread over
-uniform float u_flash;    // flash duration (s); 0 disables animation
-uniform float u_animFrac; // share of strikes that flash (keeps busy storms subtle)
-uniform float u_dot;      // dot radius scale (device px)
-uniform float u_glow;     // glow radius (device px)
-out vec2 v_px;
-out float v_age;
-out float v_fa;
-out float v_e;
+in vec2 a_corner;          // -1..1
+in vec4 a_s;               // lon, lat (deg), time (s, relative to the layer base), energy 0..1
+in float a_r;              // per-strike random 0..1: flash selection, tilt, flicker pattern
+uniform float u_tEnd;      // end of the visible window (same base as a_s.z)
+uniform float u_window;    // window length (s)
+uniform float u_mode;      // 0 live (a strike flashes as its time passes), 1 stepped
+uniform float u_prevT;     // stepped: start of the interval the step revealed
+uniform float u_wall;      // wall clock (s)
+uniform float u_stepWall;  // stepped: wall time of the step
+uniform float u_spread;    // stepped: seconds the revealed strikes are spread over
+uniform float u_flash;     // flash length (s); 0 = no animation
+uniform float u_animFrac;  // share of live/stepped strikes that flash
+uniform vec4 u_seq;        // replay: wall start, t0, t1, duration (s); duration 0 = none
+uniform vec3 u_seqOpt;     // replay: mode (1 reveal, 2 pulse), flash length per bolt, share that flash
+uniform float u_knots[17]; // replay: strike times at 0, 1/16 ... 1 of the replayed strikes (even pacing)
+uniform float u_size;      // height of the newest bolt (device px)
+uniform float u_minSize;   // height of the oldest bolt (device px)
+out vec2 v_uv;             // glyph space, -1..1 over the glyph box (rotated with the bolt)
+out vec2 v_px;             // device px from the bolt center
+out float v_age;           // 0..1 across the window
+out float v_fa;            // flash phase (s), -1 when not flashing
+out float v_fdur;
 out float v_seed;
-out float v_r;
+out float v_half;          // glyph box half size (device px)
+out float v_e;
+out float v_ageS;          // age in seconds
+
+float seqFrac(float t) {
+  if (t <= u_knots[0]) return 0.0;
+  for (int k = 1; k < 17; k++) {
+    if (t <= u_knots[k]) {
+      float a = u_knots[k - 1], b = u_knots[k];
+      return (float(k - 1) + (t - a) / max(b - a, 1e-4)) / 16.0;
+    }
+  }
+  return 1.0;
+}
+
 void main() {
   float age = u_tEnd - a_s.z;
-  bool animated = u_flash > 0.0 && a_r < u_animFrac;
-  bool fresh = u_mode > 0.5 && a_s.z > u_prevT;
-  float fa = -1.0;
-  if (animated) {
-    if (u_mode < 0.5) fa = age;
-    else if (fresh) fa = u_wall - (a_s.z - u_prevT) / max(u_tEnd - u_prevT, 1e-3) * u_spread;
-  }
   vec3 p = projectPx(radians(a_s.xy));
-  if (age < 0.0 || age > u_window || p.z < 0.0 || (fresh && animated && fa < 0.0)) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    return;
+  bool pick = a_r < u_animFrac;
+  float fa = -1.0, fdur = u_flash;
+  bool hidden = false;
+  if (u_flash > 0.0 && pick) {
+    if (u_mode < 0.5) { if (age >= 0.0 && age < u_flash) fa = age; }
+    else if (a_s.z > u_prevT) {
+      fa = (u_wall - u_stepWall) - (a_s.z - u_prevT) / max(u_tEnd - u_prevT, 1e-3) * u_spread;
+      if (fa < 0.0) hidden = true;
+    }
   }
-  bool flashing = fa >= 0.0 && fa < u_flash;
-  float r = u_dot * (1.0 + 0.9 * a_s.w);
-  float young = 1.0 - smoothstep(0.0, 0.06, age / u_window);
-  float halfSize = r * (1.0 + 2.2 * young) + 1.5;
-  if (flashing) halfSize = max(halfSize, u_glow * 1.6);
-  v_px = a_corner * halfSize;
-  v_age = age / u_window;
+  if (u_seq.w > 0.0 && a_s.z >= u_seq.y && a_s.z <= u_seq.z) {
+    float lin = (a_s.z - u_seq.y) / max(u_seq.z - u_seq.y, 1e-3);
+    float ph = (u_wall - u_seq.x) - mix(lin, seqFrac(a_s.z), 0.75) * u_seq.w;
+    if (ph < 0.0) { if (u_seqOpt.x < 1.5) hidden = true; }
+    else if (ph < u_seqOpt.y && a_r < u_seqOpt.z && (fa < 0.0 || ph < fa)) { fa = ph; fdur = u_seqOpt.y; }
+  }
+  if (age < 0.0 || age > u_window || p.z < 0.0 || hidden) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  float rec = exp(-age / (u_window * 0.22));
+  float h = mix(u_minSize, u_size, rec) * (0.9 + 0.2 * a_s.w);
+  bool flashing = fa >= 0.0 && fa < fdur;
+  float pop = flashing ? 1.0 + 0.45 * exp(-fa / max(fdur * 0.35, 0.02)) : 1.0;
+  h *= pop;
+  float halfG = h * 0.76;                          // glyph box: the bolt spans +-0.66 of it vertically
+  float young = exp(-clamp(age / u_window, 0.0, 1.0) * 14.0);
+  // the quad must contain every glow term, or its edges show as a square
+  float halfQ = flashing ? halfG * 3.4 + 6.0 : halfG * (1.0 + 0.35 * young) + 3.0;
+  float tilt = (fract(a_r * 13.7) - 0.5) * 0.5;
+  float mirror = fract(a_r * 7.31) > 0.5 ? -1.0 : 1.0;
+  vec2 q = a_corner * halfQ;                       // quad corner, device px, y up
+  float c = cos(tilt), s = sin(tilt);
+  vec2 g = vec2(c * q.x + s * q.y, -s * q.x + c * q.y) / halfG;
+  v_uv = vec2(g.x * mirror, g.y);
+  v_px = q;
+  v_half = halfG;
+  v_age = clamp(age / u_window, 0.0, 1.0);
   v_fa = flashing ? fa : -1.0;
-  v_e = a_s.w;
+  v_fdur = fdur;
   v_seed = fract(a_r * 7.13 + a_s.z * 0.618);
-  v_r = r;
-  gl_Position = vec4((p.xy + v_px) / (0.5 * u_vp.xy), 0.0, 1.0);
+  v_e = a_s.w;
+  v_ageS = max(age, 0.0);
+  gl_Position = vec4((p.xy + q) / (0.5 * u_vp.xy), 0.0, 1.0);
 }`;
 
-export const STRIKE_FS = /* glsl */ `#version 300 es
+export const BOLT_FS = /* glsl */ `#version 300 es
 precision highp float;
+in vec2 v_uv;
 in vec2 v_px;
 in float v_age;
 in float v_fa;
-in float v_e;
+in float v_fdur;
 in float v_seed;
-in float v_r;
+in float v_half;
+in float v_e;
+in float v_ageS;
 out vec4 o_color;
-uniform float u_flash;
-uniform float u_glow;
-uniform float u_gain;
+uniform sampler2D u_sdf;
+uniform float u_sdfRange;  // largest distance the SDF stores, in glyph-box units (1 = half the box)
+uniform float u_gain;      // dims flashes when many go off at once
+uniform float u_dpr;
 
 vec3 ageColor(float a) {
-  // white -> pale gold -> amber -> orange -> crimson across the window
-  vec3 c0 = vec3(1.0), c1 = vec3(1.0, 0.95, 0.66), c2 = vec3(1.0, 0.76, 0.24), c3 = vec3(1.0, 0.48, 0.17), c4 = vec3(0.88, 0.2, 0.31);
-  if (a < 0.03) return mix(c0, c1, a / 0.03);
-  if (a < 0.17) return mix(c1, c2, (a - 0.03) / 0.14);
-  if (a < 0.5) return mix(c2, c3, (a - 0.17) / 0.33);
+  vec3 c0 = vec3(1.0, 1.0, 0.96), c1 = vec3(1.0, 0.93, 0.55), c2 = vec3(1.0, 0.72, 0.2), c3 = vec3(1.0, 0.45, 0.14), c4 = vec3(0.9, 0.18, 0.3);
+  if (a < 0.04) return mix(c0, c1, a / 0.04);
+  if (a < 0.18) return mix(c1, c2, (a - 0.04) / 0.14);
+  if (a < 0.5) return mix(c2, c3, (a - 0.18) / 0.32);
   return mix(c3, c4, (a - 0.5) / 0.5);
 }
 
 float h1(float s, float k) { return fract(sin((s + k) * 91.345) * 47453.5453); }
 
-// Lightning flickers: a first return stroke and up to three more, each a sharp spike with a fast decay.
-float flicker(float t, float seed) {
+// A first return stroke and up to three more: sharp spikes with fast decays, plus an afterglow.
+float flicker(float t, float seed, float dur) {
+  float sc = clamp(dur / 0.75, 0.35, 1.0);
   float env = 0.0, start = 0.0;
   int strokes = 1 + int(floor(h1(seed, 1.0) * 3.99));
   for (int k = 0; k < 4; k++) {
     if (k >= strokes) break;
-    float amp = k == 0 ? 1.0 : 0.4 + 0.5 * h1(seed, float(k) + 2.0);
+    float amp = k == 0 ? 1.0 : 0.45 + 0.5 * h1(seed, float(k) + 2.0);
     float dt = t - start;
-    if (dt >= 0.0) env = max(env, amp * exp(-dt / 0.04));
-    start += 0.05 + 0.11 * h1(seed, float(k) + 7.0);
+    if (dt >= 0.0) env = max(env, amp * exp(-dt / (0.045 * sc)));
+    start += (0.05 + 0.11 * h1(seed, float(k) + 7.0)) * sc;
   }
-  return env + 0.12 * exp(-t / 0.28);
+  return env + 0.22 * exp(-t / (0.3 * sc));
 }
 
 void main() {
-  float d = length(v_px);
+  // signed distance to the bolt outline in device px (positive outside); past the glyph box the
+  // texture is clamped, so take the distance to the box as a lower bound
+  float sd = texture(u_sdf, vec2(v_uv.x * 0.5 + 0.5, 0.5 - v_uv.y * 0.5)).r;
+  float rangePx = u_sdfRange * v_half;
+  float d = max((0.5 - sd) * 2.0 * rangePx, length(max(abs(v_uv) - 1.0, 0.0)) * v_half);
+  float r = length(v_px);
+  float aa = 0.6 * u_dpr;
+  float fill = 1.0 - smoothstep(-aa, aa, d);
+  float ow = min(1.7 * u_dpr, 0.4 * rangePx);       // outline stays inside what the SDF can encode
+  float outline = (1.0 - smoothstep(ow * 0.45, ow, d)) * (1.0 - fill);
+  // older bolts recede a little so the newest stand out in a busy cell
+  float fade = (1.0 - smoothstep(0.88, 1.0, v_age)) * mix(1.0, 0.7, smoothstep(0.25, 1.0, v_age));
   vec3 col = ageColor(v_age);
-  float fade = 1.0 - smoothstep(0.86, 1.0, v_age);
-  float aDot = (1.0 - smoothstep(v_r - 0.8, v_r + 0.8, d)) * mix(1.0, 0.5, v_age) * fade;
-  float rim = smoothstep(v_r - 0.6, v_r + 0.4, d) * (1.0 - smoothstep(v_r + 0.4, v_r + 1.6, d)) * 0.55 * fade;
-  float young = 1.0 - smoothstep(0.0, 0.06, v_age);
-  vec3 glow = col * exp(-pow(d / (v_r * 2.4), 2.0)) * 0.2 * young;
-  vec3 rgb = col * aDot + glow;
-  float a = aDot + rim * (1.0 - aDot);
+  float young = exp(-v_age * 14.0);
+  vec3 core = mix(col, vec3(1.0), 0.55 * young);
+  vec3 rgb = core * fill * fade;
+  float a = (fill + outline * 0.8 * (1.0 - fill)) * fade;
+  // a strike glows softly for a few seconds after it lands; a busy cell lands several per second, so
+  // the glow is short and dims with u_gain or the glows pile up into a white blob that hides the bolts
+  rgb += col * exp(-pow(r / (v_half * 0.5), 2.0)) * 0.28 * exp(-v_ageS / 6.0) * u_gain * (1.0 - fill) * fade;
   if (v_fa >= 0.0) {
-    float u = v_fa / u_flash;
-    float env = flicker(v_fa, v_seed) * u_gain * (0.7 + 0.5 * v_e);
-    vec3 bolt = vec3(0.84, 0.9, 1.0);
-    rgb += bolt * (exp(-pow(d / (u_glow * 0.16), 2.0)) * 0.8 + exp(-pow(d / (u_glow * 0.62), 2.0)) * 0.13) * env;
-    float rr = mix(3.0, u_glow * 0.95, 1.0 - pow(1.0 - u, 3.0));
-    rgb += bolt * exp(-pow((d - rr) / 1.0, 2.0)) * 0.24 * (1.0 - u) * (1.0 - u) * u_gain;
-    rgb += vec3(1.0) * (1.0 - smoothstep(v_r * 1.3 - 0.6, v_r * 1.3 + 0.6, d)) * env;
+    float u = clamp(v_fa / v_fdur, 0.0, 1.0);
+    float env = flicker(v_fa, v_seed, v_fdur) * u_gain * (0.75 + 0.45 * v_e);
+    float bloom = env * mix(0.3, 1.0, exp(-v_age * 8.0));
+    vec3 bolt = vec3(0.86, 0.92, 1.0);
+    rgb = mix(rgb, vec3(1.0) * fill, clamp(env * 1.4, 0.0, 1.0));
+    rgb += bolt * (exp(-pow(r / (v_half * 0.55), 2.0)) * 0.9 + exp(-pow(r / (v_half * 1.25), 2.0)) * 0.24) * bloom;
+    float rr = mix(v_half * 0.4, v_half * 2.6, 1.0 - pow(1.0 - u, 3.0));
+    rgb += bolt * exp(-pow((r - rr) / (1.3 * u_dpr), 2.0)) * 0.45 * (1.0 - u) * (1.0 - u) * u_gain;
+    a = max(a, fill);
   }
   if (a < 0.003 && max(rgb.r, max(rgb.g, rgb.b)) < 0.003) discard;
   o_color = vec4(rgb, a);
 }`;
+
+// Map labels: sprites from the label atlas, anchored at lon/lat and snapped to whole device pixels
+// so the atlas texels land 1:1 on screen pixels (crisp text, no shimmer while panning).
+export const LABEL_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec2 a_corner;   // 0..1
+in vec2 a_ll;       // lon, lat (deg)
+in vec2 a_off;      // sprite top-left relative to the anchor (device px, y down)
+in vec2 a_size;     // sprite size (device px)
+in vec2 a_uv;       // sprite top-left in the atlas (px)
+in float a_alpha;
+uniform vec2 u_buf;        // drawing buffer size (px)
+uniform vec2 u_atlasSize;
+out vec2 v_uv;
+out float v_a;
+void main() {
+  vec3 p = projectPx(radians(a_ll));
+  float a = a_alpha * smoothstep(0.035, 0.09, p.z);
+  if (a <= 0.003) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec2 ndc = p.xy / (0.5 * u_vp.xy);
+  vec2 px = vec2((ndc.x * 0.5 + 0.5) * u_buf.x, (0.5 - ndc.y * 0.5) * u_buf.y);
+  vec2 tl = floor(px + a_off + 0.5);
+  vec2 q = tl + a_corner * a_size;
+  gl_Position = vec4(q.x / u_buf.x * 2.0 - 1.0, 1.0 - q.y / u_buf.y * 2.0, 0.0, 1.0);
+  v_uv = (a_uv + a_corner * a_size) / u_atlasSize;
+  v_a = a;
+}`;
+
+export const LABEL_FS = /* glsl */ `#version 300 es
+precision mediump float;
+in vec2 v_uv;
+in float v_a;
+uniform sampler2D u_atlas;
+out vec4 o_color;
+void main() {
+  vec4 c = texture(u_atlas, v_uv);
+  if (c.a < 0.004) discard;
+  o_color = c * v_a;
+}`;
+
+// WPC front symbols (cold triangles, warm half-discs, dryline open half-discs), oriented along the
+// front on screen. Shapes are signed distance fields, so they stay crisp at any angle and size.
+export const FRONTSYM_VS = /* glsl */ `#version 300 es
+precision highp float;
+${PROJ}
+in vec2 a_corner;    // -1..1
+in vec4 a_ll;        // symbol lon, lat, and a point just ahead along the front (deg)
+in vec2 a_kind;      // kind (0 triangle, 1 half-disc, 2 open half-disc), side (+1 left of travel, -1 right)
+in vec3 a_color;
+uniform float u_size;   // device px
+out vec2 v_local;       // device px: x along the front, y toward the symbol side
+out vec3 v_color;
+flat out float v_kind;
+void main() {
+  vec3 pa = projectPx(radians(a_ll.xy));
+  vec3 pb = projectPx(radians(a_ll.zw));
+  vec2 d = pb.xy - pa.xy;
+  float len = length(d);
+  if (pa.z < 0.02 || pb.z < 0.0 || len < 1e-3 || len > 0.5 * max(u_vp.x, u_vp.y)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec2 dir = d / len;
+  vec2 nrm = vec2(-dir.y, dir.x) * a_kind.y;
+  vec2 local = vec2(a_corner.x * 1.25, mix(-0.35, 1.35, a_corner.y * 0.5 + 0.5)) * u_size;
+  vec2 p = pa.xy + dir * local.x + nrm * local.y;
+  v_local = local;
+  v_color = a_color;
+  v_kind = a_kind.x;
+  gl_Position = vec4(p / (0.5 * u_vp.xy), 0.0, 1.0);
+}`;
+
+export const FRONTSYM_FS = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_local;
+in vec3 v_color;
+flat in float v_kind;
+uniform float u_size;
+uniform float u_dpr;
+out vec4 o_color;
+float sdTri(vec2 p, vec2 a, vec2 b, vec2 c) {
+  vec2 e0 = b - a, e1 = c - b, e2 = a - c;
+  vec2 v0 = p - a, v1 = p - b, v2 = p - c;
+  vec2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+  vec2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+  vec2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+  float s = sign(e0.x * e2.y - e0.y * e2.x);
+  vec2 d = min(min(vec2(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)), vec2(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))),
+               vec2(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x)));
+  return -sqrt(d.x) * sign(d.y);
+}
+void main() {
+  float s = u_size;
+  float d;
+  if (v_kind < 0.5) d = sdTri(v_local, vec2(-0.82 * s, 0.0), vec2(0.82 * s, 0.0), vec2(0.0, 1.05 * s));
+  else {
+    float r = 0.72 * s;
+    float disc = length(v_local) - r;
+    d = max(disc, -v_local.y);
+    if (v_kind > 1.5) d = max(abs(disc) - u_dpr, -v_local.y);
+  }
+  float aa = 0.75;
+  float fill = 1.0 - smoothstep(-aa, aa, d);
+  float edge = 1.0 - smoothstep(-aa, aa, d - 1.4 * u_dpr);
+  if (edge < 0.004) discard;
+  vec3 col = v_color * fill;
+  float a = fill + (edge - fill) * 0.6;
+  o_color = vec4(col, a);
+}`;
+
+// Copies the cached surface pass to the screen, pixel for pixel.
+export const BLIT_FS = /* glsl */ `#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+out vec4 o_color;
+void main() { o_color = texelFetch(u_tex, ivec2(gl_FragCoord.xy), 0); }`;

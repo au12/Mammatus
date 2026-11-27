@@ -23,7 +23,19 @@ function niceLabel(kind, canon, cmapId, raw) {
   return a >= 10 ? String(Math.round(d)) : a >= 1 ? String(Math.round(d * 10) / 10) : String(Math.round(d * 100) / 100);
 }
 
-const BOLT = '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M13.2 2.8 5.8 13.2h5.4l-1.4 8 7.4-10.4h-5.4z" fill="#ffd36b" stroke="#ffb52e" stroke-width="1" stroke-linejoin="round"/></svg>';
+const BOLT_PATH = "M13.2 2.8 5.8 13.2h5.4l-1.4 8 7.4-10.4h-5.4z";
+const BOLT = `<svg viewBox="0 0 24 24" width="15" height="15"><path d="${BOLT_PATH}" fill="#ffd36b" stroke="#ffb52e" stroke-width="1" stroke-linejoin="round"/></svg>`;
+// Newest strikes are the biggest and whitest; they shrink and redden with age (matches the map).
+const BOLT_RAMP = (() => {
+  const steps = [[19, "#fffef4"], [15, "#ffec8f"], [12, "#ffb53a"], [9.5, "#ff7a2c"], [7.5, "#e0344f"]];
+  let x = 0;
+  const parts = steps.map(([size, color]) => {
+    const k = size / 24, tx = x - 5.4 * k, ty = (20 - size) / 2;
+    x += size * 0.62 + 7;
+    return `<path d="${BOLT_PATH}" transform="translate(${tx.toFixed(2)} ${ty.toFixed(2)}) scale(${k.toFixed(3)})" fill="${color}" stroke="rgba(4,6,12,.75)" stroke-width="${(1.4 / k).toFixed(2)}" stroke-linejoin="round" paint-order="stroke"/>`;
+  });
+  return `<svg viewBox="0 0 ${x.toFixed(1)} 20" height="18" preserveAspectRatio="xMinYMid meet" aria-hidden="true">${parts.join("")}</svg>`;
+})();
 const FRONT_KEY = '<svg viewBox="0 0 44 14" width="44" height="14"><path d="M1 10h21" stroke="#4d8dff" stroke-width="2.2"/><path d="m6 10 3.2-5.2L12.4 10z" fill="#4d8dff"/><path d="M22 10h21" stroke="#ff4f62" stroke-width="2.2"/><path d="M29.5 10a3.6 3.6 0 0 1 7.2 0z" fill="#ff4f62"/></svg>';
 const hhz = (d) => when(d);
 
@@ -105,7 +117,8 @@ export class Legend {
         h("span", { class: `ovl-ic bolt${lightning.mode === "live" && !lightning.warming ? " live" : ""}`, html: BOLT, title: lightning.mode === "live" ? "Live" : "" }),
         h("b", {}, "Lightning"),
         lightning.mode !== "off" && lightning.available && !lightning.warming
-          ? h("span", { class: "ovl-ramp" }, h("i"), h("small", {}, "now"), h("small", {}, `${mins} min`)) : null,
+          ? h("span", { class: "ovl-bolts", title: `Newest strikes are the biggest; they shrink and redden over ${mins} minutes` },
+            h("span", { html: BOLT_RAMP }), h("small", {}, "now"), h("small", {}, `${mins} min`)) : null,
         status));
     }
     if (fronts?.enabled) {

@@ -2,6 +2,8 @@
 // so an idle view costs no GPU time or battery.
 import { buffer, compile, dataTexture, imageTexture, loadImage, texture } from "./gl.js";
 import { Camera } from "./camera.js";
+import { Labels } from "./labels.js";
+import { FrontLayer } from "./fronts.js";
 import * as S from "./shaders.js";
 
 const DEG = Math.PI / 180;
@@ -46,21 +48,32 @@ export class Renderer extends EventTarget {
     this.tex = {};
     this.time = new Date();
     this.timeInfo = sunAndSidereal(this.time);
-    this.maxDpr = this.lowPower ? 2 : 2;
+    this.maxDpr = 2;
     this._raf = 0;
     this._lastFrame = 0;
+    this._lastCam = -1;
     this.lastInteraction = performance.now();
     this.idleParticleMs = this.lowPower ? 20000 : 120000;
+    // ambient animation (wind particles, lightning) runs at most this often; interaction never waits
+    this.ambientMs = this.lowPower ? 1000 / 30 : 1000 / 60;
     this.fieldAnim = null;
     this.frames = 0;
+    this.stats = { frames: 0, skipped: 0, drawMs: 0, cached: 0 };
+    this._linesSorted = null;
+    this.surfaceVersion = 0;
+    this.surfaceCache = { fbo: null, tex: null, w: 0, h: 0, sig: null };
+    this._ambientOnly = false;
     this._init();
     this._observe();
+    this.labels = new Labels(this);
+    this.frontLayer = new FrontLayer(this);
   }
 
   _init() {
     const gl = this.gl;
     this.quad = buffer(gl, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
     this.corner = buffer(gl, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]));
+    this.corner01 = buffer(gl, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]));
     // 2-degree lon/lat mesh used only while morphing between globe and map
     const step = 2, nx = 360 / step + 1, ny = 180 / step + 1;
     const verts = new Float32Array(nx * ny * 2);
@@ -89,9 +102,19 @@ export class Renderer extends EventTarget {
     const ro = new ResizeObserver(() => this.resize());
     ro.observe(this.canvas);
     this.resize();
-    this.canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
+    this.canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      this.lost = true;
+      this.dispatchEvent(new Event("contextlost"));
+    });
+    // Every GPU resource is gone after a restore, and rebuilding them all in place is fragile;
+    // reloading brings the app back where it was (the view and layer live in the URL).
     this.canvas.addEventListener("webglcontextrestored", () => location.reload());
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) this.requestRender(); });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      if (this.lost) setTimeout(() => { if (this.lost && !document.hidden) location.reload(); }, 1500);
+      else this.requestRender();
+    });
   }
 
   resize() {
@@ -120,12 +143,14 @@ export class Renderer extends EventTarget {
     this.tex.day = imageTexture(gl, day, { aniso: this.aniso });
     this.tex.night = imageTexture(gl, night, { aniso: this.aniso });
     this.tex.terrain = imageTexture(gl, terrain, { aniso: this.aniso });
+    this.surfaceVersion++;
     this.requestRender();
   }
 
   setStars(stars) {
     const gl = this.gl;
     this.stars = { dir: buffer(gl, stars.dir), mt: buffer(gl, stars.mt), count: stars.count };
+    this.surfaceVersion++;
     this.requestRender();
   }
 
@@ -133,6 +158,7 @@ export class Renderer extends EventTarget {
     const gl = this.gl;
     if (this.tex.clouds) gl.deleteTexture(this.tex.clouds);
     this.tex.clouds = img ? imageTexture(gl, img, { aniso: this.aniso }) : null;
+    this.surfaceVersion++;
     this.requestRender();
   }
 
@@ -146,16 +172,20 @@ export class Renderer extends EventTarget {
   // f: {grid, kind, qs, tex0, tex1, mix, lut, lutRows, stops, nstops, hemi, opacity}
   setField(f) {
     this.field = f;
+    this.surfaceVersion++;
     this.requestRender();
   }
 
   crossfade(f, ms = 260) {
-    if (!this.field || !f || this.field.grid?.id !== f.grid?.id || this.field.kind !== f.kind || ms <= 0) {
+    // fade from what this frame is heading to (mid-fade, that is the newer of the two)
+    const cur = this.fieldAnim ? this.fieldAnim.target : this.field;
+    if (!cur || !f || !f.tex0 || cur.grid?.id !== f.grid?.id || cur.kind !== f.kind || ms <= 0) {
       this.fieldAnim = null;
       this.setField(f);
       return;
     }
-    this.field = { ...f, tex1: f.tex0, tex0: this.field.tex0, mix: 0 };
+    this.field = { ...f, tex1: f.tex0, tex0: cur.tex0, mix: 0 };
+    this.surfaceVersion++;
     this.fieldAnim = { t0: performance.now(), ms, target: f };
     this.requestRender();
   }
@@ -165,6 +195,7 @@ export class Renderer extends EventTarget {
     const gl = this.gl;
     const old = this.lines.get(id);
     if (old?.vbo) gl.deleteBuffer(old.vbo);
+    this._linesSorted = null;
     if (!data || data.length < 6) { this.lines.delete(id); this.requestRender(); return; }
     this.lines.set(id, { vbo: buffer(gl, data), count: data.length / 3 - 1, ...style });
     this.requestRender();
@@ -172,7 +203,7 @@ export class Renderer extends EventTarget {
 
   setLineStyle(id, patch) {
     const l = this.lines.get(id);
-    if (l) { Object.assign(l, patch); this.requestRender(); }
+    if (l) { Object.assign(l, patch); this._linesSorted = null; this.requestRender(); }
   }
 
   // ----------------------------------------------------------------- county fills (alerts)
@@ -197,10 +228,11 @@ export class Renderer extends EventTarget {
     this.fills.colorTex = t;
     this.fills.rows = rows;
     this.fills.visible = true;
+    this.surfaceVersion++;
     this.requestRender();
   }
 
-  hideCountyFills() { if (this.fills) { this.fills.visible = false; this.requestRender(); } }
+  hideCountyFills() { if (this.fills) { this.fills.visible = false; this.surfaceVersion++; this.requestRender(); } }
 
   // ----------------------------------------------------------------- particles
   setParticles(cfg) {
@@ -235,33 +267,47 @@ export class Renderer extends EventTarget {
 
   _frame(now) {
     this._raf = 0;
-    if (document.hidden) return;
-    let more = this.camera.step(now);
+    if (document.hidden || this.lost) return;
+    const cam = this.camera;
+    let more = cam.step(now);
+    // The view is moving (gesture, fling, fly-to, morph): draw every frame the display offers.
+    const interacting = more || cam.version !== this._lastCam || now - this.lastInteraction < 120;
     if (this.fieldAnim) {
       const a = this.fieldAnim;
-      const u = Math.min(1, (now - a.t0) / a.ms);
+      const u = Math.min(1, Math.max(0, (now - a.t0) / a.ms));
       this.field.mix = u * u * (3 - 2 * u);
       if (u >= 1) { this.field = a.target; this.fieldAnim = null; } else more = true;
     }
-    if (this.strikes?.animating(now)) {
-      if (this.lowPower && now - this._lastFrame < 30) { this._raf = requestAnimationFrame((t) => this._frame(t)); return; }
-      more = true;
-    }
+    if (this._safe("labels", () => this.labels.update(now))) more = true;
+    this._safe("fronts", () => this.frontLayer.update());
+    let ambient = false;
+    if (this._safe("lightning", () => this.strikes?.animating(now))) ambient = true;
     const p = this.particles;
     let animParticles = false;
     if (p?.enabled) {
       const idle = now - this.lastInteraction > this.idleParticleMs;
       p.fade = Math.max(0, Math.min(1, p.fade + (idle ? -0.03 : 0.06)));
       animParticles = p.fade > 0;
-      if (animParticles) {
-        // cap at ~30 fps on low-power devices to save battery
-        if (this.lowPower && now - this._lastFrame < 30) { this._raf = requestAnimationFrame((t) => this._frame(t)); return; }
-        more = true;
-      }
+      if (animParticles) ambient = true;
     }
+    // Only ambient animation wants this frame: hold it to the ambient rate (30 fps on phones).
+    if (ambient && !more && !interacting && now - this._lastFrame < this.ambientMs - 2) {
+      // sleep until the next ambient frame is due instead of spinning on every vsync
+      this.stats.skipped++;
+      if (!this._ambientTimer) {
+        this._ambientTimer = setTimeout(() => { this._ambientTimer = 0; this.requestRender(); }, Math.max(0, this.ambientMs - (now - this._lastFrame) - 3));
+      }
+      return;
+    }
+    this._ambientOnly = ambient && !more && !interacting;
+    if (ambient) more = true;
     this._lastFrame = now;
+    this._lastCam = cam.version;
+    const t0 = performance.now();
     this.draw(now, animParticles);
+    this.stats.drawMs = this.stats.drawMs * 0.9 + (performance.now() - t0) * 0.1;
     this.frames++;
+    this.stats.frames++;
     this.dispatchEvent(new Event("frame"));
     if (more) this.requestRender();
   }
@@ -283,17 +329,92 @@ export class Renderer extends EventTarget {
       gl.uniform2fv(p.uniforms.u_merc, U.merc);
     };
 
-    const skyVisible = t < 0.999 && !this._globeCoversScreen(U.d);
-    if (skyVisible) this._drawSky(common, 1 - t);
-
-    this._drawSurface(common, t);
-    if (this.fills?.visible && this.fills.colorTex) this._drawFills(common);
+    // The sky, globe and data layer are the expensive full-screen part. While the map is still and
+    // only particles or lightning animate, draw them once into a texture and copy it each frame.
+    const sig = this._ambientOnly ? this._surfaceSig(U) : null;
+    const sc = this.surfaceCache;
+    if (sig && sc.sig === sig && sc.tex && sc.w === this.canvas.width && sc.h === this.canvas.height) {
+      this._blitSurface();
+      this.stats.cached++;
+    } else if (sig && this._surfaceTarget()) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, sc.fbo);
+      gl.viewport(0, 0, sc.w, sc.h);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this._drawBase(common, U, t);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      sc.sig = sig;
+      this._blitSurface();
+    } else {
+      sc.sig = null;
+      this._drawBase(common, U, t);
+    }
     if (this.particles?.enabled && this.particles.fade > 0 && this.particles.tex) this._drawParticles(common, now, animParticles);
     const zoom = cam.zoom;
-    const sorted = [...this.lines.values()].filter((l) => l.visible !== false && zoom >= (l.minZoom ?? -9) && zoom < (l.maxZoom ?? 99))
-      .sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
-    if (sorted.length) this._drawLines(common, sorted);
-    if (this.strikes?.visible()) this._drawStrikes(common, now);
+    this._linesSorted ||= [...this.lines.values()].sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
+    const lines = this._linesSorted.filter((l) => l.visible !== false && zoom >= (l.minZoom ?? -9) && zoom < (l.maxZoom ?? 99));
+    if (lines.length) this._drawLines(common, lines);
+    this._safe("fronts", () => this.frontLayer.draw(common));
+    this._safe("labels", () => this.labels.draw(common));
+    this._safe("lightning", () => { if (this.strikes?.visible()) this._drawStrikes(common, now); });
+  }
+
+  // Optional layers run isolated: a bug or a bad datum in labels, fronts or lightning is logged
+  // once and that layer sits the frame out, instead of an exception stopping the map from drawing.
+  _safe(name, fn) {
+    try {
+      return fn();
+    } catch (err) {
+      this._failures ||= {};
+      if (!this._failures[name]) console.error(`Mammatus: ${name} layer failed`, err);
+      this._failures[name] = (this._failures[name] || 0) + 1;
+      return undefined;
+    }
+  }
+
+  _drawBase(common, U, t) {
+    const skyVisible = t < 0.999 && !this._globeCoversScreen(U.d);
+    if (skyVisible) this._drawSky(common, 1 - t);
+    this._drawSurface(common, t);
+    if (this.fills?.visible && this.fills.colorTex) this._drawFills(common);
+  }
+
+  // Everything the cached surface depends on.
+  _surfaceSig(U) {
+    const f = this.field, L = this.look;
+    return `${this.camera.version}|${U.d.t.toFixed(4)}|${this.surfaceVersion}|${f ? `${f.mix}|${f.opacity}` : "-"}|${L.dim}|${L.styled}|${L.clouds}|${L.realism}|${L.styleZoom}|${this.timeInfo.gmst}|${this.canvas.width}x${this.canvas.height}`;
+  }
+
+  _surfaceTarget() {
+    const gl = this.gl, sc = this.surfaceCache;
+    const w = this.canvas.width, h = this.canvas.height;
+    if (sc.tex && sc.w === w && sc.h === h) return true;
+    if (sc.tex) gl.deleteTexture(sc.tex);
+    if (sc.fbo) gl.deleteFramebuffer(sc.fbo);
+    sc.tex = texture(gl, { filter: gl.NEAREST });
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    sc.fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sc.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sc.tex, 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    sc.w = w; sc.h = h; sc.sig = null;
+    if (!ok) { gl.deleteTexture(sc.tex); gl.deleteFramebuffer(sc.fbo); sc.tex = sc.fbo = null; sc.w = sc.h = 0; }
+    return ok;
+  }
+
+  _blitSurface() {
+    const gl = this.gl;
+    const p = this.prog("blit", S.SKY_VS, S.BLIT_FS);
+    gl.useProgram(p.prog);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.surfaceCache.tex);
+    gl.uniform1i(p.uniforms.u_tex, 0);
+    this._bindQuad(p);
+    gl.disable(gl.BLEND);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.enable(gl.BLEND);
+    gl.disableVertexAttribArray(p.attribs.a_pos);
   }
 
   // ----------------------------------------------------------------- lightning
@@ -304,9 +425,9 @@ export class Renderer extends EventTarget {
 
   _drawStrikes(common, now) {
     const st = this.strikes.frameState(now);
-    if (!st.vbo || st.count <= 0) return;
+    if (!st || !st.vbo || st.count <= 0) return;
     const gl = this.gl;
-    const p = this.prog("strikes", S.STRIKE_VS, S.STRIKE_FS);
+    const p = this.prog("bolts", S.BOLT_VS, S.BOLT_FS);
     gl.useProgram(p.prog);
     common(p);
     const u = p.uniforms;
@@ -315,12 +436,21 @@ export class Renderer extends EventTarget {
     gl.uniform1f(u.u_mode, st.mode);
     gl.uniform1f(u.u_prevT, st.prevT);
     gl.uniform1f(u.u_wall, st.wall);
+    gl.uniform1f(u.u_stepWall, st.stepWall);
     gl.uniform1f(u.u_spread, st.spread);
     gl.uniform1f(u.u_flash, st.flash);
-    gl.uniform1f(u.u_dot, st.dot);
-    gl.uniform1f(u.u_glow, st.glow);
-    gl.uniform1f(u.u_gain, st.gain);
     gl.uniform1f(u.u_animFrac, st.animFrac);
+    gl.uniform4fv(u.u_seq, st.seq);
+    gl.uniform3fv(u.u_seqOpt, st.seqOpt);
+    if (u.u_knots) gl.uniform1fv(u.u_knots, st.knots);
+    gl.uniform1f(u.u_size, st.size);
+    gl.uniform1f(u.u_minSize, st.minSize);
+    gl.uniform1f(u.u_gain, st.gain);
+    gl.uniform1f(u.u_dpr, this.camera.dpr);
+    gl.uniform1f(u.u_sdfRange, st.sdfRange);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, st.sdf);
+    gl.uniform1i(u.u_sdf, 0);
     const A = p.attribs;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.enableVertexAttribArray(A.a_corner);
@@ -355,18 +485,57 @@ export class Renderer extends EventTarget {
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   }
 
+  // The Milky Way depends only on the direction on the sky, so it is rendered once into an
+  // equirectangular texture (celestial coordinates) instead of evaluating fractal noise per pixel per frame.
+  _bakeSky() {
+    const gl = this.gl;
+    const W = this.lowPower ? 1024 : 2048, H = W / 2;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+      const p = this.prog("skybake", S.SKY_VS, S.SKYBAKE_FS);
+      gl.useProgram(p.prog);
+      gl.viewport(0, 0, W, H);
+      gl.disable(gl.BLEND);
+      gl.uniform4f(p.uniforms.u_vp, W, H, 0, 0);
+      this._bindQuad(p);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.disableVertexAttribArray(p.attribs.a_pos);
+      gl.enable(gl.BLEND);
+      this.tex.sky = tex;
+    } else { gl.deleteTexture(tex); this.tex.sky = null; }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+  }
+
   _drawSky(common, fade) {
     const gl = this.gl;
     gl.bindVertexArray(null);
-    const p = this.prog("sky", S.SKY_VS, S.SKY_FS);
-    gl.useProgram(p.prog);
-    common(p);
-    gl.uniform1f(p.uniforms.u_gmst, this.timeInfo.gmst);
-    gl.uniform1f(p.uniforms.u_fade, fade);
-    this._bindQuad(p);
-    gl.disable(gl.BLEND);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    gl.enable(gl.BLEND);
+    if (this.tex.sky === undefined) this._bakeSky();
+    if (this.tex.sky) {
+      const p = this.prog("sky", S.SKY_VS, S.SKY_FS);
+      gl.useProgram(p.prog);
+      common(p);
+      gl.uniform1f(p.uniforms.u_gmst, this.timeInfo.gmst);
+      gl.uniform1f(p.uniforms.u_fade, fade);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex.sky);
+      gl.uniform1i(p.uniforms.u_sky, 0);
+      this._bindQuad(p);
+      gl.disable(gl.BLEND);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.enable(gl.BLEND);
+      gl.disableVertexAttribArray(p.attribs.a_pos);
+    }
     if (this.stars) {
       const sp = this.prog("stars", S.STAR_VS, S.STAR_FS);
       gl.useProgram(sp.prog);
@@ -486,7 +655,7 @@ export class Renderer extends EventTarget {
       gl.enableVertexAttribArray(A.a_b);
       gl.vertexAttribPointer(A.a_b, 3, gl.FLOAT, false, 12, 12);
       gl.vertexAttribDivisor(A.a_b, 1);
-      gl.uniform2f(p.uniforms.u_dash, l.dash ? l.dash[0] : 0, l.dash ? l.dash[1] : 0);
+      gl.uniform3f(p.uniforms.u_dash, l.dash ? l.dash[0] : 0, l.dash ? l.dash[1] : 0, l.dash ? l.dash[2] || 0 : 0);
       if (l.halo) {
         gl.uniform1f(p.uniforms.u_width, (l.width + l.halo * 2) * dpr);
         gl.uniform4fv(p.uniforms.u_color, l.haloColor || [0, 0, 0, 0.45]);

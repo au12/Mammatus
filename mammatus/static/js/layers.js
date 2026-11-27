@@ -70,8 +70,9 @@ export class Layers extends EventTarget {
     this.current = null;
     this.errors.clear();
     this.r.setParticles(null);
+    this.store.pin("wind", []);
     this.clearContours();
-    if (src.type !== "model") this.r.setField(null);
+    if (src.type !== "model") { this.r.setField(null); this.store.pin("field", []); this.store.pin("fieldPrev", []); this.shown = null; }
     let idx = 0;
     if (src.type !== "model") idx = steps.length - 1;
     else if (prevTime) idx = nearest(steps, prevTime);
@@ -171,6 +172,10 @@ export class Layers extends EventTarget {
     };
     this.r.look.dim = 0.6;
     const smooth = crossfade && this.app.prefs.smooth !== false;
+    // keep the outgoing frame's texture alive through the cross-fade
+    this.store.pin("fieldPrev", smooth ? [this.shown] : []);
+    this.store.pin("field", [entry]);
+    this.shown = entry;
     if (smooth) this.r.crossfade(f, this.app.playing ? Math.min(380, this.app.frameMs() * 0.55) : 240); else this.r.setField(f);
   }
 
@@ -230,8 +235,10 @@ export class Layers extends EventTarget {
     for (const id of [...this.r.lines.keys()]) if (id.startsWith("contour") && !seen.has(id)) this.r.setLines(id, null);
     this.app.overlay.setContourLabels(labels);
     this.app.overlay.setHilo(hilo);
-    if (windEntry) {
-      this.r.setParticles({ tex: this.store.texture(windEntry), grid: windEntry.header.grid,
+    const windTex = windEntry && this.store.texture(windEntry);
+    this.store.pin("wind", windTex ? [windEntry] : []);
+    if (windTex) {
+      this.r.setParticles({ tex: windTex, grid: windEntry.header.grid,
         qs: [windEntry.header.scale, windEntry.header.offset], speed: 3.0, trail: 3.0 });
     } else this.r.setParticles(null);
   }
