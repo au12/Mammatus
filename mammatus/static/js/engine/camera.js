@@ -21,7 +21,22 @@ export class Camera {
     this.maxZoom = 12.5;
     this.anim = null;
     this.morphAnim = null;
+    this.kinetic = null;
     this.version = 0;
+  }
+
+  // Put the view back in range if anything (a corrupt saved view, a bad deep link) made it
+  // non-finite: one NaN would otherwise poison every later pan and zoom.
+  sanitize() {
+    let bad = false;
+    if (!Number.isFinite(this.lon)) { this.lon = -96; bad = true; }
+    if (!Number.isFinite(this.lat)) { this.lat = 38; bad = true; }
+    if (!Number.isFinite(this.zoom)) { this.zoom = 3.6; bad = true; }
+    this.lon = wrap180(this.lon);
+    this.lat = Math.max(-89, Math.min(89, this.lat));
+    this.zoom = this.clampZoom(this.zoom);
+    if (bad) { this.anim = null; this.kinetic = null; }
+    return !bad;
   }
 
   setViewport(w, h, dpr) {
@@ -136,10 +151,12 @@ export class Camera {
 
   clampZoom(z) {
     const max = this.mode === "globe" ? 9 : this.maxZoom;
+    if (!Number.isFinite(z)) return Number.isFinite(this.zoom) ? Math.max(this.minZoom, Math.min(max, this.zoom)) : 3.6;
     return Math.max(this.minZoom, Math.min(max, z));
   }
 
   setCenter(lon, lat) {
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
     this.lon = wrap180(lon);
     this.lat = Math.max(-89, Math.min(89, lat));
     this.changed();
@@ -147,6 +164,7 @@ export class Camera {
 
   // Drag by CSS pixels so the grabbed point follows the pointer.
   panBy(dx, dy) {
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
     const d = this.derived();
     if (d.t > 0.5) {
       const my = d.merc0 + dy / this.k;
@@ -161,6 +179,7 @@ export class Camera {
   }
 
   zoomAround(x, y, dz) {
+    if (!Number.isFinite(dz) || !Number.isFinite(x) || !Number.isFinite(y)) return;
     const before = this.unproject(x, y);
     this.zoom = this.clampZoom(this.zoom + dz);
     this.changed();
@@ -173,9 +192,11 @@ export class Camera {
   }
 
   flyTo(target, duration = 1600) {
+    if (!target || !Number.isFinite(target.lon) || (target.lat != null && !Number.isFinite(target.lat))) return;
+    this.kinetic = null;
     const start = { lon: this.lon, lat: this.lat, zoom: this.zoom };
     let dlon = wrap180(target.lon - start.lon);
-    const end = { lon: start.lon + dlon, lat: target.lat ?? start.lat, zoom: this.clampZoom(target.zoom ?? start.zoom) };
+    const end = { lon: start.lon + dlon, lat: Math.max(-85, Math.min(85, target.lat ?? start.lat)), zoom: this.clampZoom(target.zoom ?? start.zoom) };
     const dist = Math.hypot(dlon, end.lat - start.lat);
     const peak = Math.min(start.zoom, end.zoom) - Math.min(3, dist / 25);
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
@@ -189,8 +210,29 @@ export class Camera {
     const kx = (this.w - pad * 2) / spanLon;
     const ky = (this.h - pad * 2) / (spanLat / Math.cos(lat * DEG));
     const k = Math.min(kx, ky);
-    const zoom = Math.log2((k * 2 * Math.PI) / 512);
+    const zoom = k > 0 ? Math.log2((k * 2 * Math.PI) / 512) : this.zoom;
     this.flyTo({ lon, lat, zoom });
+  }
+
+  // Animated zoom that keeps the lon/lat under (x, y) fixed on screen (double-tap, buttons).
+  zoomAt(x, y, dz, duration = 320) {
+    if (!Number.isFinite(dz)) return;
+    const anchor = this.unproject(x, y);
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    this.kinetic = null;
+    this.anim = { kind: "zoomAt", x, y, anchor, z0: this.zoom, z1: this.clampZoom(this.zoom + dz), t0: performance.now(), duration: reduce ? 1 : duration };
+    this.changed();
+  }
+
+  // Momentum after a drag: velocity in CSS px per ms, decaying smoothly on the frame clock.
+  fling(vx, vy) {
+    if (!Number.isFinite(vx) || !Number.isFinite(vy)) return;
+    let sp = Math.hypot(vx, vy);
+    if (sp < 0.12) return;
+    const max = 5;
+    if (sp > max) { vx *= max / sp; vy *= max / sp; sp = max; }
+    this.kinetic = { vx, vy, last: null };
+    this.changed();
   }
 
   setMode(mode) {
@@ -205,21 +247,44 @@ export class Camera {
   // Advance animations; returns true while something is still moving.
   step(now) {
     let moving = false;
-    if (this.anim) {
+    if (this.kinetic) {
+      const k = this.kinetic;
+      const dt = k.last == null ? 16 : Math.min(40, Math.max(0, now - k.last));
+      k.last = now;
+      const decay = Math.pow(0.9952, dt);
+      k.vx *= decay; k.vy *= decay;
+      this.panBy(k.vx * dt, k.vy * dt);
+      if (Math.hypot(k.vx, k.vy) < 0.015) this.kinetic = null; else moving = true;
+    }
+    if (this.anim?.kind === "zoomAt") {
       const a = this.anim;
-      const u = Math.min(1, (now - a.t0) / a.duration);
+      const u = Math.max(0, Math.min(1, (now - a.t0) / a.duration));
+      const z = a.z0 + (a.z1 - a.z0) * (1 - Math.pow(1 - u, 3));
+      this.zoom = this.clampZoom(z);
+      this.changed();
+      if (a.anchor) {
+        for (let i = 0; i < 2; i++) {
+          const p = this.project(a.anchor.lon, a.anchor.lat);
+          if (p.vis < 0) break;
+          this.panBy(a.x - p.x, a.y - p.y);
+        }
+      }
+      if (u >= 1) this.anim = null; else moving = true;
+    } else if (this.anim) {
+      const a = this.anim;
+      const u = Math.max(0, Math.min(1, (now - a.t0) / a.duration));
       const e = ease(u);
       this.lon = wrap180(a.start.lon + (a.end.lon - a.start.lon) * e);
       this.lat = a.start.lat + (a.end.lat - a.start.lat) * e;
       const base = a.start.zoom + (a.end.zoom - a.start.zoom) * e;
       const dip = Math.sin(Math.PI * e) * Math.max(0, Math.min(a.start.zoom, a.end.zoom) - a.peak);
-      this.zoom = base - dip;
+      this.zoom = Math.max(0.5, base - dip);
       this.changed();
       if (u >= 1) this.anim = null; else moving = true;
     }
     if (this.morphAnim) {
       const m = this.morphAnim;
-      const u = Math.min(1, (now - m.t0) / m.duration);
+      const u = Math.max(0, Math.min(1, (now - m.t0) / m.duration));
       this.t = m.from + (m.to - m.from) * ease(u);
       this.changed();
       if (u >= 1) this.morphAnim = null; else moving = true;
@@ -227,7 +292,9 @@ export class Camera {
     return moving;
   }
 
-  cancelAnimation() { this.anim = null; }
+  cancelAnimation() { this.anim = null; this.kinetic = null; }
+
+  moving() { return !!(this.anim || this.kinetic || this.morphAnim); }
 
   // Visible bounding box in degrees (approximate; used for spawning and LOD decisions).
   visibleSpanDeg() { return Math.min(360, (this.w / this.k) / DEG); }
