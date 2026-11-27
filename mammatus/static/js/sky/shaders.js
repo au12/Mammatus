@@ -778,7 +778,7 @@ void main() {
         // the light march only looks a few km toward the light; under a towering storm the rest of the
         // column above still has to be crossed, so its base and shadowed flanks go dark and ominous
         float column = max(aux.a * ZTOP - p.z, 0.0) / max(u_light.z, 0.3);
-        sun *= mix(1.0, exp(-max(column - 3.0, 0.0) * 0.16), smoothstep(6.0, 40.0, tau));
+        sun *= mix(1.0, max(exp(-max(column - 3.0, 0.0) * 0.09), 0.18), smoothstep(6.0, 40.0, tau));
         float powder = 1.0 - 0.45 * exp(-se * 0.3);
         float hh = dm > d ? 0.12 : max(h, sat(p.z / 3.0) * step(d, 0.0));
         vec3 amb = mix(u_ambBot, u_ambTop, smoothstep(0.0, 1.0, hh)) * (0.6 + 0.4 * hh);
@@ -794,7 +794,7 @@ void main() {
           float fd = length(p - u_flash[k].xyz);
           fl += u_flash[k].w * exp(-fd * 0.12) / (1.0 + fd * fd * 0.012);
         }
-        vec3 S = (sc * 0.995 + sr * 0.55 + ss * 0.85) * cutF * (Lc * sun * powder * 10.0 + amb * 0.62 + u_flashCol * fl * 0.1);
+        vec3 S = (sc * 0.995 + sr * 0.55 + ss * 0.85) * cutF * (Lc * sun * powder * 10.0 + amb * 0.62 + u_flashCol * fl * 0.055);
         float Tr = exp(-se * dt);
         L += T * (S - S * Tr) / se;
         // what the halo and the rainbow need: thin, sunlit ice and rain on this ray

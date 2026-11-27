@@ -583,11 +583,11 @@ export class SkyRenderer {
       gl.vertexAttribDivisor(A.a_w, 1);
       // glow, then the hot core
       gl.uniform3fv(u.u_col, [0.62, 0.66, 1.0]);
-      gl.uniform1f(u.u_width, 9 * this.dpr);
-      gl.uniform1f(u.u_i, b.i * 0.35);
+      gl.uniform1f(u.u_width, 7 * this.dpr);
+      gl.uniform1f(u.u_i, b.i * 0.22);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, b.n);
-      gl.uniform1f(u.u_width, 1.8 * this.dpr);
-      gl.uniform1f(u.u_i, b.i * 1.6);
+      gl.uniform1f(u.u_width, 1.3 * this.dpr);
+      gl.uniform1f(u.u_i, b.i * 1.3);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, b.n);
     }
     for (const a of [A.a_a, A.a_b, A.a_w]) { gl.vertexAttribDivisor(a, 0); gl.disableVertexAttribArray(a); }

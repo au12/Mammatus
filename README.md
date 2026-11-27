@@ -42,6 +42,16 @@ family can use it from anywhere.
 - **Fronts.** NOAA WPC's hand-drawn surface analysis (every 3 hours) and its 12–48 hour forecast fronts,
   matched to the timeline: cold, warm, stationary and occluded fronts with proper symbols, troughs, and
   WPC highs and lows when the map isn't already showing model pressure centers.
+- **Sky view.** Press **Sky** on any point card (or **S**) and the map swoops down into a 3D side view of
+  the atmosphere above that place: a cut-away diorama from the ground to 52,000 ft, with real volumetric
+  clouds of the right type, amount and height, built from the model's own cloud water and ice (HRRR,
+  then RRFS, then GFS; Open-Meteo profiles marked *Estimated* only for ECMWF or outages). Clouds condense
+  in when it opens and drift with the model's winds at 4× real time; the timeline keeps working.
+  Thunderstorms flash with lightning that lights the cloud from inside (real GOES strikes when they are
+  near), cirrostratus throws a 22° halo and sun dogs, sunlit rain makes rainbows, and nights have the
+  real stars, the moon in its phase and city glow on the cloud bases. Labels name each layer with its
+  heights; observed METAR ceilings, a view from the ground, a gentle soundscape, tilt parallax, an
+  ambient mode for a spare screen and save-as-image are in the ⋯ menu.
 - **Point forecasts.** Tap anywhere: the value under your finger, active NWS alerts, then a multi-model
   meteogram (HRRR, RRFS, NBM, GFS, ECMWF, AIFS, ICON, GEM, UKMO) with daily consensus highs/lows,
   model spread, accumulated precip and snow, wind, pressure and cloud cover.
@@ -71,15 +81,18 @@ family can use it from anywhere.
 | Live GOES lightning over Mexico, the Andes and the Amazon, with the infrared satellite | WPC fronts over GFS precipitation type and isobars |
 | ![Regional view with point card](docs/screenshots/desktop-regional.jpg) | ![Skew-T sounding](docs/screenshots/desktop-sounding.jpg) |
 | HRRR simulated radar at county level, tap for details | Skew-T and indices (demo profile) |
+| ![Sky view: a thunderstorm in the afternoon](docs/screenshots/desktop-sky.jpg) | ![Sky view: the same storm at night, lit by lightning](docs/screenshots/desktop-sky-night.jpg) |
+| Sky view: a thunderstorm's dark base under its anvil, with mammatus (demo scene) | The same storm at night, lit from inside by a lightning flash |
 
 <p align="center">
-  <img src="docs/screenshots/mobile-map.jpg" width="23%" alt="Mobile map">
-  <img src="docs/screenshots/mobile-fronts.jpg" width="23%" alt="Mobile fronts">
-  <img src="docs/screenshots/mobile-globe.jpg" width="23%" alt="Mobile globe">
-  <img src="docs/screenshots/mobile-forecast.jpg" width="23%" alt="Mobile meteogram">
+  <img src="docs/screenshots/mobile-map.jpg" width="19%" alt="Mobile map">
+  <img src="docs/screenshots/mobile-fronts.jpg" width="19%" alt="Mobile fronts">
+  <img src="docs/screenshots/mobile-globe.jpg" width="19%" alt="Mobile globe">
+  <img src="docs/screenshots/mobile-forecast.jpg" width="19%" alt="Mobile meteogram">
+  <img src="docs/screenshots/mobile-sky.jpg" width="19%" alt="Mobile Sky view">
 </p>
 
-<p align="center"><sub>Meteogram and sounding screenshots use demo data; the maps are real model output.</sub></p>
+<p align="center"><sub>Meteogram, sounding and Sky view screenshots use demo data; the maps are real model output.</sub></p>
 
 ## Install on Unraid
 
@@ -129,6 +142,7 @@ for an Nginx Proxy Manager walkthrough and the security model.
 | `MAMMATUS_PUBLIC_URL` | — | External `https://` URL; used for invite links, secure cookies and push |
 | `MAMMATUS_MODELS` | `hrrr,rrfs,gfs,ecmwf,aifs` | Models to offer |
 | `MAMMATUS_CACHE_GB` | `10` | Frame cache size cap |
+| `MAMMATUS_SKY_CACHE_GB` | `2` | Sky view cache size cap (3D cloud boxes around viewed points) |
 | `MAMMATUS_RETENTION_HOURS` | `54` | How long model frames are kept |
 | `MAMMATUS_TRUSTED_PROXIES` | private networks | Who may set `X-Forwarded-For/Proto` |
 | `MAMMATUS_HSTS` | `false` | Send `Strict-Transport-Security` |
@@ -149,6 +163,11 @@ for an Nginx Proxy Manager walkthrough and the security model.
   ecCodes, derived (winds rotated to earth-relative, accumulations, Kuchera snow, precip type, vorticity…),
   quantized to 16-bit, delta-coded and gzip-compressed into three levels of detail. Mirrors are tried in
   order (AWS → Google Cloud → NOMADS/ECMWF). Everything lives in SQLite and a size-capped disk cache.
+- **Sky view:** for a point, the server byte-ranges the model's hydrometeor mixing ratios (cloud water,
+  ice, rain, snow, graupel) on pressure levels for a 120 km box, places them by hypsometric height, and
+  packs a 40×40×64 voxel grid (3 km × 250 m) with coverage, convectiveness and layer base/top, plus a
+  cloud classification, storm cells and the nearest METAR. The browser ray-marches it through tileable
+  Perlin–Worley noise with multiple-scattering light, temporal accumulation and a physical sky.
 - **Lightning:** GLM publishes 20-second netCDF files (170–360 KB, of which the flashes are a few KB).
   Mammatus only downloads them while someone has the layer on (about 100 MB per hour for both
   satellites, 65 MB for East alone), splits the overlap between the satellites at the longitude
@@ -159,7 +178,7 @@ for an Nginx Proxy Manager walkthrough and the security model.
   projection with exact inverse per pixel, data textures sampled in-shader on the model's native grid
   (lat/lon or Lambert conformal), perceptual OKLab color ramps, GPU particle advection with transform
   feedback, instanced anti-aliased lines, GPU text from a sprite atlas, signed-distance-field symbols,
-  Web Workers for decoding and contouring. The whole app is about 105 kB gzipped.
+  Web Workers for decoding and contouring. The whole app is about 155 kB gzipped.
 
 ## Development
 

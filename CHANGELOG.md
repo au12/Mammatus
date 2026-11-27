@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.1.0 — 2026-11-27
+
+### Sky view
+- A new **Sky** action on the point card (shortcut **S**) swoops from the map into a 3D side view of the
+  atmosphere above the point: a cut-away diorama at true scale from the ground to 52,000 ft, with the
+  sky graded from pale blue through violet to the black of space. Pinch or scroll out to about 100 km
+  to see neighbouring cells and watch a line of storms arrive; drag to turn; **G** switches to a view
+  from the ground. The FAB becomes a single exit button and the timeline keeps working.
+- **Real cloud water.** The server reads cloud water, ice, rain, snow and graupel on the model's
+  pressure levels (HRRR, then RRFS, then GFS) for a 120 km box and packs a 40×40×64 voxel grid with
+  coverage, convectiveness, layer bases and tops, winds and terrain. ECMWF, or an outage, falls back to
+  an Open-Meteo profile shown with an *Estimated* badge. Boxes are cached on disk
+  (`MAMMATUS_SKY_CACHE_GB`, default 2).
+- **Cloud types.** Each layer is classified (cumulus, towering cumulus, cumulonimbus with anvil,
+  stratocumulus, stratus, nimbostratus, altocumulus, altostratus, cirrus, cirrostratus, cirrocumulus,
+  fog) and labelled with its heights; tap a label for what it means.
+- **Rendering.** Volumetric ray marching through tileable Perlin–Worley noise with domain warping,
+  cauliflower lobes on towers, fibrous cirrus, ragged sheet and rain-curtain edges, mammatus under
+  anvils, multiple-scattering light with a powder term, cloud shadows, light shafts, a physical sky,
+  temporal accumulation and an invisible dither. Clouds condense in when the view opens and drift with
+  the model's winds at 4× real time; frames cross-fade along the timeline.
+- **Storms** are dark and heavy underneath, with lightning: cloud-to-ground bolts with branches and
+  return strokes, crawlers under the anvil, and flashes that light the cloud from inside. Real GOES
+  strikes near the point are used when they arrive.
+- **Optics and night.** 22° halos and sun dogs with chromatic dispersion in thin ice cloud, primary and
+  secondary rainbows in sunlit rain, sun and moon discs (the moon in its true phase), the real stars,
+  and city glow on cloud bases.
+- **Extras** in the ⋯ menu: observed METAR ceilings drawn at their heights, a synthesized soundscape
+  (rain, wind, thunder timed to the flashes), tilt parallax on phones, an ambient mode for a spare
+  screen (keeps it awake, slows the frame rate) and save as image with a caption.
+- Deep links: `#sky=lat,lon` opens the view directly; the back button closes it.
+
 ## 1.0.0 — 2026-11-26
 
 First release.
