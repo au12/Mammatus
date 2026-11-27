@@ -28,7 +28,7 @@ export class Fronts extends EventTarget {
     clearInterval(this.timer);
     if (!on) {
       this.current = null;
-      this.app.overlay.setFronts(null);
+      this.draw(null, false);
       this.emit("status", this.info());
       return;
     }
@@ -74,9 +74,14 @@ export class Fronts extends EventTarget {
     if (set !== this.current || centers !== this.centers) {
       this.current = set;
       this.centers = centers;
-      this.app.overlay.setFronts(set, { centers });
+      this.draw(set, centers);
       this.emit("status", this.info());
     }
+  }
+
+  draw(set, centers) {
+    this.app.renderer.frontLayer.set(set || null);
+    this.app.overlay.setFrontCenters(centers && set ? set.highs : [], centers && set ? set.lows : []);
   }
 
   info() {

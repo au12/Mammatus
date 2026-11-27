@@ -77,11 +77,25 @@ export class Timeline {
       // short spans (radar/satellite): hour labels
       for (let t = Math.ceil(t0 / hourMs) * hourMs; t <= t1; t += hourMs) this.deco.append(h("span", { class: "day", style: { left: pct(t) } }, when(new Date(t)).split(" ").slice(1).join(" ")));
     } else {
-      this.deco.append(h("span", { class: "day", style: { left: "0%", transform: "none" } }, dayW > 70 ? dayLabel(steps[0].time) : weekday(steps[0].time)));
-      for (const t of labels) {
-        if ((t - t0) / span < 0.06) continue;
-        this.deco.append(h("span", { class: "day", style: { left: pct(t) } }, dayW > 70 ? dayLabel(new Date(t)) : weekday(new Date(t))));
-        this.deco.append(h("i", { class: "tick", style: { left: pct(t), top: "9px", height: "12px", background: "rgba(255,255,255,.28)" } }));
+      // day labels, kept from colliding on narrow tracks: the start label shortens or yields to a
+      // nearby day boundary, and boundaries too close together drop out
+      const long = dayW > 70;
+      const est = (txt) => txt.length * 6.2 + 10;
+      const px = (t) => this.pos(new Date(t)) * wide;
+      const marks = labels.filter((t) => (t - t0) / span >= 0.02).map((t) => ({ t, x: px(t), txt: long ? dayLabel(new Date(t)) : weekday(new Date(t)) }));
+      let startTxt = long ? dayLabel(steps[0].time) : weekday(steps[0].time);
+      if (marks.length && est(startTxt) > marks[0].x - est(marks[0].txt) / 2) startTxt = weekday(steps[0].time);
+      let lastRight = -Infinity;
+      if (!marks.length || est(startTxt) <= marks[0].x - est(marks[0].txt) / 2) {
+        this.deco.append(h("span", { class: "day", style: { left: "0%", transform: "none" } }, startTxt));
+        lastRight = est(startTxt);
+      }
+      for (const m of marks) {
+        const w = est(m.txt);
+        if (m.x - w / 2 < lastRight + 6 || m.x + w / 2 > wide + 4) continue;
+        lastRight = m.x + w / 2;
+        this.deco.append(h("span", { class: "day", style: { left: pct(m.t) } }, m.txt));
+        this.deco.append(h("i", { class: "tick", style: { left: pct(m.t), top: "9px", height: "12px", background: "rgba(255,255,255,.28)" } }));
       }
       // night shading at the map center
       const c = this.app.renderer.camera;
