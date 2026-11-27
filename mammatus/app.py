@@ -254,6 +254,7 @@ async def lifespan(app: FastAPI):
         await engine.stop()
         await runs.stop()
         await close_client()
+        svc.sky.close()
         frames.close()
 
 

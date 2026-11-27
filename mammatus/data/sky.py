@@ -56,21 +56,26 @@ GENERA = {
     "Ci": "Cirrus", "Cs": "Cirrostratus", "Cc": "Cirrocumulus",
 }
 
+# The 2D fields of a sky frame. They are whole-domain messages of a megabyte or more each (two thirds of
+# an HRRR hour, before this list was cut down), so only what changes the picture is fetched: the anchor of
+# the height calculation, the air at the ground, instability, storms, the low cloud the model keeps
+# sub-grid, and its own cloud base. The terrain is fetched once per region and kept.
 _F2D = {
     "psfc": W("PRES", "surface"), "orog": W("HGT", "surface"),
     "t2m": W("TMP", "2 m above ground"), "d2m": W("DPT", "2 m above ground"),
-    "cape": W("CAPE", "surface"), "pbl": W("HPBL", "surface"),
-    "refc": W("REFC", EA), "vis": W("VIS", "surface"),
-    "lcc": W("LCDC", "low cloud layer"), "mcc": W("MCDC", "middle cloud layer"),
-    "hcc": W("HCDC", "high cloud layer"), "tcc": W("TCDC", EA),
-    "blcc": W("TCDC", "boundary layer cloud layer", "any"),
+    "cape": W("CAPE", "surface"), "refc": W("REFC", EA),
+    "lcc": W("LCDC", "low cloud layer"), "blcc": W("TCDC", "boundary layer cloud layer", "any"),
 }
 _F2D_CAM = {
-    **_F2D, "cbase": W("HGT", "cloud base"), "ctop": W("HGT", "cloud top"), "ltng": W("LTNG", "entire atmosphere"),
+    **_F2D, "cbase": W("HGT", "cloud base"), "ltng": W("LTNG", "entire atmosphere"),
 }
 _NEAREST = {"cbase", "ctop"}     # fields with holes: never blend across them
-T_LEVELS = (1000, 925, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150, 100)
-W_LEVELS = (925, 850, 700, 500, 300)
+# Temperature and wind are smooth in the vertical, and their messages are the big ones (0.6 MB each for
+# HRRR, where a hydrometeor level is a tenth of that): a few levels, joined in log-pressure, place the
+# pressure surfaces to within about 20 m.
+T_LEVELS = (1000, 925, 850, 700, 500, 400, 300, 200, 100)
+W_LEVELS = (925, 700, 500, 250)
+COARSE_KM, COARSE_DEG = 36.0, 0.5     # temperature and wind are kept for the whole domain at about this spacing
 
 
 @dataclass(frozen=True)
@@ -830,6 +835,12 @@ def box_from_block(blk: Block, lat: float, lon: float, sm: SkyModel) -> Box:
     }
     cb = point("cbase")
     box.sfc["ceil"] = None if cb is None else cb - elev
+    if box.sfc.get("vis") is None:
+        # what the model's visibility diagnostic does: extinction by the cloud water, rain and snow in the
+        # lowest level (Kunkel; Stoelinga and Warner), under a clear-air ceiling
+        lw, rw, sw = (float(a[c4].mean()) for a in (box.liq[0] * box.frac[0], box.rain[0], box.snow[0]))
+        beta = 144.7 * lw ** 0.88 + 2.24 * rw ** 0.75 + 10.36 * sw ** 0.7776
+        box.sfc["vis"] = float(min(24000.0, 3912.0 / max(beta, 1e-6)))
     return box
 
 
@@ -939,8 +950,11 @@ def _box_from_levels(blk: Block, sm: SkyModel, ri, rj, f2, elev, lcc, cbase, cap
         lcl = np.clip(125.0 * (t2 - d2), 150.0, 3000.0) + (f2["orog"] - elev)
         b = np.where(np.isfinite(cbase), cbase, lcl) if cbase is not None else lcl
         b = np.clip(b, 100.0, 2800.0)
+        # shallow in a stable morning, deeper as the instability grows (the boundary-layer height would say
+        # the same, for a 3 MB download per hour)
         pbl = f2.get("pbl")
-        depth = np.clip((pbl + (f2["orog"] - elev) - b + 350.0) if pbl is not None else 500.0, 300.0, 1500.0)
+        depth = np.clip((pbl + (f2["orog"] - elev) - b + 350.0) if pbl is not None
+                        else 350.0 + 1000.0 * smoothstep(100.0, 1200.0, cape), 300.0, 1500.0)
         for k in range(k3 + 6):
             inside = (ZC[k] + DZ / 2 > b) & (ZC[k] - DZ / 2 < b + depth) & (sub > 0.03)
             hf = np.clip((ZC[k] - b) / depth, 0.0, 1.0)
@@ -1016,6 +1030,35 @@ def _decode_crop(blob: bytes, lat: float, lon: float, core: int, halo: int):
     return grid, reg, np.ascontiguousarray(d.values[np.ix_(reg.jj, reg.ii)])
 
 
+def coarse_factor(spec: dict) -> int:
+    """How many grid cells make one cell of the coarse, whole-domain temperature and wind fields."""
+    if spec["type"] == "latlon":
+        return max(1, int(round(COARSE_DEG / abs(spec["dlon"]))))
+    return max(1, min(16, int(round(COARSE_KM * 1000.0 / abs(spec["dx"])))))
+
+
+def _decode_coarse(blob: bytes):
+    """A whole field as block means (temperature and wind vary slowly: one copy serves every region)."""
+    from .frames import _decode_locked
+
+    d = _decode_locked(blob)
+    grid = register_grid(d.grid)
+    f = coarse_factor(grid.spec)
+    v = d.values
+    if f > 1:
+        h, w = (v.shape[0] // f) * f, (v.shape[1] // f) * f
+        v = v[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3))
+    return grid, f, np.ascontiguousarray(v, dtype=np.float32)
+
+
+def from_coarse(c: np.ndarray, f: int, reg: Region) -> np.ndarray:
+    """Coarse whole-domain fields [L, hc, wc] resampled onto a region's cells [L, h, w]."""
+    cj = np.clip((reg.jj.astype(np.float32) - (f - 1) / 2.0) / f, 0.0, c.shape[-2] - 1.0)
+    ci = np.clip((reg.ii.astype(np.float32) - (f - 1) / 2.0) / f, 0.0, c.shape[-1] - 1.0)
+    ri, rj = np.meshgrid(ci, cj)
+    return bilinear(c.astype(np.float32), ri, rj)
+
+
 class SkyService:
     """Builds and caches sky frames. Shares the frame service's GRIB indexes and decode pool."""
 
@@ -1030,7 +1073,23 @@ class SkyService:
         self._inflight: dict = {}
         self._sem = asyncio.Semaphore(3)
         self._lock = threading.Lock()
+        self._pool = None
         self.stats = {"frames": 0, "blocks": 0, "bytes_downloaded": 0}
+
+    @property
+    def pool(self):
+        """Decode threads for sky blocks: a couple of hundred whole-domain messages make one hour, so
+        this is where the cores go (when ecCodes may decode in parallel; otherwise the shared pool)."""
+        if self._pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            from .frames import parallel_decode
+
+            if parallel_decode():
+                self._pool = ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2)), thread_name_prefix="sky")
+            else:
+                self._pool = self.frames.pool
+        return self._pool
 
     # -- public ---------------------------------------------------------------
     async def frame(self, model_id: str, run: str, fhr: int, lat: float, lon: float, detail: int = 1) -> bytes:
@@ -1038,6 +1097,7 @@ class SkyService:
         if sm is None:
             raise NotAvailable("No sky data from this model")
         lat, lon = round(lat, 3), round(lon, 3)
+        detail = 1          # (the 2D "sketch" of earlier versions is gone: one request, the real thing)
         key = (model_id, run, fhr, lat, lon, detail)
         hit = self._out.get(key)
         if hit is not None:
@@ -1053,7 +1113,7 @@ class SkyService:
         def build() -> bytes:
             return pack(box_from_block(blk, lat, lon, sm), header)
 
-        out = await loop.run_in_executor(self.frames.pool, build)
+        out = await loop.run_in_executor(self.pool, build)
         self._remember(self._out, key, out, 96)
         self.stats["frames"] += 1
         return out
@@ -1104,7 +1164,7 @@ class SkyService:
                 st = f.stat()
             except OSError:
                 continue
-            if now - st.st_mtime > max_age_h * 3600:
+            if now - st.st_mtime > max_age_h * 3600 and f.parent.name != "static":
                 f.unlink(missing_ok=True)
                 removed += st.st_size
             else:
@@ -1124,6 +1184,11 @@ class SkyService:
         shutil.rmtree(self.root, ignore_errors=True)
         self._blocks.clear()
         self._out.clear()
+
+    def close(self) -> None:
+        if self._pool is not None and self._pool is not self.frames.pool:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+        self._pool = None
 
     # -- blocks ---------------------------------------------------------------
     def _remember(self, store: OrderedDict, key, value, cap: int) -> None:
@@ -1157,6 +1222,9 @@ class SkyService:
     def _path(self, sm: SkyModel, run: str, fhr: int, reg: str, part: str) -> Path:
         return self.root / sm.id / run / f"{fhr:03d}_{reg}_{part}.npz"
 
+    def _static(self, sm: SkyModel, reg: str) -> Path:
+        return self.root / sm.id / "static" / f"{reg}.npz"
+
     async def _block(self, sm: SkyModel, run: str, fhr: int, lat: float, lon: float, detail: int) -> Block:
         rk = self._reg_key(sm, lat, lon)
         full = self._blocks.get((sm.id, run, fhr, rk))
@@ -1164,11 +1232,17 @@ class SkyService:
             self._blocks.move_to_end((sm.id, run, fhr, rk))
             return full
         async with self._sem:
-            grid, reg, f2 = await self._once(("2d", sm.id, run, fhr, rk), lambda: self._part2d(sm, run, fhr, lat, lon))
-            blk = Block(grid, reg, f2)
-            if detail == 0:
-                return blk
-            d3 = await self._once(("3d", sm.id, run, fhr, reg.key), lambda: self._part3d(sm, run, fhr, lat, lon, reg))
+            two = self._once(("2d", sm.id, run, fhr, rk), lambda: self._part2d(sm, run, fhr, lat, lon))
+            grid = self.frames.model_grids.get(sm.id)
+            if grid is None:
+                # the very first sky frame from this model: its grid comes with the first decoded field
+                grid, reg, f2 = await two
+                d3 = await self._part3d(sm, run, fhr, lat, lon, reg)
+            else:
+                # everything at once: the surface fields, the hydrometeors, temperature and wind
+                reg = region_for(grid, lat, lon, sm.core, sm.halo)
+                (grid, reg, f2), d3 = await asyncio.gather(two, self._part3d(sm, run, fhr, lat, lon, reg))
+        blk = Block(grid, reg, f2)
         blk.levels = d3["levels"].astype(np.int32)
         blk.q = {sp: d3[f"q_{sp}"] for sp in SPECIES}
         blk.frac3 = d3.get("frac3")
@@ -1187,26 +1261,52 @@ class SkyService:
             f2 = await loop.run_in_executor(None, _load_npz, self._path(sm, run, fhr, reg.key, "2d"))
             if f2 is not None:
                 return grid, reg, {k: v.astype(np.float32) for k, v in f2.items()}
+        # the model's terrain never changes: once per region is enough
+        orog = None
+        if grid is not None:
+            st = await loop.run_in_executor(None, _load_npz, self._static(sm, reg.key))
+            orog = None if st is None else st.get("orog")
         recs, urls = await self.frames.records(model, _default_product(sm.id), parse_run(run), fhr)
-        picks = {name: select(recs, sel, fhr) for name, sel in sm.fields2d.items()}
+        picks = {name: select(recs, sel, fhr) for name, sel in sm.fields2d.items() if not (name == "orog" and orog is not None)}
         picks = {k: r for k, r in picks.items() if r is not None}
         for need in ("psfc", "orog", "t2m"):
-            if need not in picks:
+            if need not in picks and not (need == "orog" and orog is not None):
                 raise NotAvailable(f"{model.short} f{fhr:03d} has no {need} field")
         names = list(picks)
-        arrs, grid, reg = await self._planes(urls, [picks[n] for n in names], lat, lon, sm)
+        res = await self._fetch_decode(urls, [picks[n] for n in names], _decode_crop, lat, lon, sm.core, sm.halo)
+        grid, reg = res[0][0], res[0][1]
         self.frames.model_grids.setdefault(sm.id, grid)
-        f2 = {n: a.astype(np.float32) for n, a in zip(names, arrs)}
+        f2 = {n: r[2].astype(np.float32) for n, r in zip(names, res)}
+        if orog is not None and orog.shape == f2["psfc"].shape:
+            f2["orog"] = orog.astype(np.float32)
+        elif "orog" not in f2:
+            raise NotAvailable(f"{model.short} f{fhr:03d} has no terrain field")
+        else:
+            await loop.run_in_executor(None, _save_npz, self._static(sm, reg.key), {"orog": f2["orog"]})
         await loop.run_in_executor(None, _save_npz, self._path(sm, run, fhr, reg.key, "2d"), f2)
         return grid, reg, f2
 
     async def _part3d(self, sm: SkyModel, run: str, fhr: int, lat: float, lon: float, reg: Region) -> dict:
+        """The pressure-level part of a block: hydrometeors cropped to the region, with temperature and
+        wind resampled from the coarse whole-domain copy every region shares."""
         loop = asyncio.get_running_loop()
-        path = self._path(sm, run, fhr, reg.key, "3d")
-        d3 = await loop.run_in_executor(None, _load_npz, path)
-        if d3 is not None:
-            return d3
-        t0 = time.perf_counter()
+        # blocks cached by earlier versions hold everything in one file
+        old = await loop.run_in_executor(None, _load_npz, self._path(sm, run, fhr, reg.key, "3d"))
+        if old is not None:
+            return old
+        q, tuv = await asyncio.gather(
+            self._once(("q", sm.id, run, fhr, reg.key), lambda: self._part_q(sm, run, fhr, lat, lon, reg)),
+            self._once(("tuv", sm.id, run, fhr), lambda: self._part_tuv(sm, run, fhr)))
+        d3 = dict(q)
+        f = int(tuv["factor"])
+        d3["tlev"], d3["wlev"] = tuv["tlev"], tuv["wlev"]
+        d3["t"] = from_coarse(tuv["t"], f, reg)
+        if len(tuv["wlev"]):
+            d3["u"], d3["v"] = from_coarse(tuv["u"], f, reg), from_coarse(tuv["v"], f, reg)
+        return d3
+
+    async def _levels(self, sm: SkyModel, run: str, fhr: int):
+        """The pressure-level messages of this hour, by variable and level, and where to fetch them."""
         model = REGISTRY[sm.id]
         recs3, urls3 = await self.frames.records(model, sm.product3d or _default_product(sm.id), parse_run(run), fhr)
         by: dict = {}
@@ -1214,63 +1314,92 @@ class SkyService:
             lev = _level(r)
             if lev is not None and r.tkind == "instant":
                 by.setdefault(r.var, {}).setdefault(lev, r)
+        return by, urls3
+
+    async def _part_q(self, sm: SkyModel, run: str, fhr: int, lat: float, lon: float, reg: Region) -> dict:
+        loop = asyncio.get_running_loop()
+        path = self._path(sm, run, fhr, reg.key, "q")
+        d3 = await loop.run_in_executor(None, _load_npz, path)
+        if d3 is not None:
+            return d3
+        t0 = time.perf_counter()
+        model = REGISTRY[sm.id]
+        by, urls3 = await self._levels(sm, run, fhr)
         levels = sorted((lv for lv in by.get(sm.species["cw"], {}) if 100 <= lv <= 1000), reverse=True)
         levels = [lv for lv in levels if all(lv in by.get(sm.species[sp], {}) for sp in SPECIES)]
         if len(levels) < 8 or "TMP" not in by:
             raise NotAvailable(f"{model.short} f{fhr:03d} has no cloud water on pressure levels")
+        want: list[tuple[str, Record]] = []
+        for sp in SPECIES:
+            want += [(f"q_{sp}", by[sm.species[sp]][lv]) for lv in levels]
+        if sm.frac3d and all(lv in by.get(sm.frac3d, {}) for lv in levels):
+            want += [("frac3", by[sm.frac3d][lv]) for lv in levels]
+        res = await self._fetch_decode(urls3, [r for _, r in want], _decode_crop, lat, lon, sm.core, sm.halo)
+        d3 = {"levels": np.array(levels, np.int16)}
+        for name in dict.fromkeys(n for n, _ in want):
+            stack = np.stack([r[2] for (n, _), r in zip(want, res) if n == name])
+            if name == "frac3":
+                stack = stack / 100.0
+            d3[name] = stack.astype(np.float16)
+        await loop.run_in_executor(None, _save_npz, path, d3)
+        self.stats["blocks"] += 1
+        log.info("sky block %s %s f%03d %s in %.1fs", sm.id, run, fhr, reg.key, time.perf_counter() - t0)
+        return d3
+
+    async def _part_tuv(self, sm: SkyModel, run: str, fhr: int) -> dict:
+        """Temperature and wind on a few levels for the whole domain, as coarse block means."""
+        loop = asyncio.get_running_loop()
+        path = self.root / sm.id / run / f"{fhr:03d}_tuv.npz"
+        d = await loop.run_in_executor(None, _load_npz, path)
+        if d is not None:
+            return d
+        model = REGISTRY[sm.id]
+        by, urls3 = await self._levels(sm, run, fhr)
+        if "TMP" not in by:
+            raise NotAvailable(f"{model.short} f{fhr:03d} has no temperature on pressure levels")
 
         def near(want, have):
             return sorted({min(have, key=lambda x: abs(x - w)) for w in want}, reverse=True) if have else []
 
         tlev = near(T_LEVELS, list(by["TMP"]))
         wlev = [lv for lv in near(W_LEVELS, list(by.get("UGRD", {}))) if lv in by.get("VGRD", {})]
-        want: list[tuple[str, Record]] = []
-        for sp in SPECIES:
-            want += [(f"q_{sp}", by[sm.species[sp]][lv]) for lv in levels]
-        if sm.frac3d and all(lv in by.get(sm.frac3d, {}) for lv in levels):
-            want += [("frac3", by[sm.frac3d][lv]) for lv in levels]
-        want += [("t", by["TMP"][lv]) for lv in tlev]
+        want = [("t", by["TMP"][lv]) for lv in tlev]
         want += [("u", by["UGRD"][lv]) for lv in wlev] + [("v", by["VGRD"][lv]) for lv in wlev]
-        arrs, _, _ = await self._planes(urls3, [r for _, r in want], lat, lon, sm)
-        d3 = {"levels": np.array(levels, np.int16), "tlev": np.array(tlev, np.int16), "wlev": np.array(wlev, np.int16)}
-        for name in dict.fromkeys(n for n, _ in want):
-            stack = np.stack([a for (n, _), a in zip(want, arrs) if n == name])
-            if name == "frac3":
-                stack = stack / 100.0
-            d3[name] = stack.astype(np.float16) if name[0] in "qf" else stack.astype(np.float32)
-        await loop.run_in_executor(None, _save_npz, path, d3)
-        self.stats["blocks"] += 1
-        log.info("sky block %s %s f%03d %s in %.1fs", sm.id, run, fhr, reg.key, time.perf_counter() - t0)
-        return d3
+        res = await self._fetch_decode(urls3, [r for _, r in want], _decode_coarse)
+        self.frames.model_grids.setdefault(sm.id, res[0][0])
+        d = {"tlev": np.array(tlev, np.int16), "wlev": np.array(wlev, np.int16), "factor": np.array(res[0][1], np.int16)}
+        for name in ("t", "u", "v"):
+            arrs = [r[2] for (n, _), r in zip(want, res) if n == name]
+            if arrs:
+                d[name] = np.stack(arrs).astype(np.float32)
+        await loop.run_in_executor(None, _save_npz, path, d)
+        return d
 
-    async def _planes(self, urls: list[str], recs: list[Record], lat, lon, sm: SkyModel):
-        """Fetch + decode messages a few at a time, keeping only the region (whole fields never pile up)."""
+    async def _fetch_decode(self, urls: list[str], recs: list[Record], fn, *args) -> list:
+        """Fetch messages (neighbours in the file share a request) and decode each as it lands, on the
+        sky pool: downloads and decodes overlap, and whole fields never pile up."""
         loop = asyncio.get_running_loop()
         out: list = [None] * len(recs)
-        meta: list = [None, None]
         order = sorted(range(len(recs)), key=lambda i: recs[i].start)
-        chunks = [order[i:i + 10] for i in range(0, len(order), 10)]
-        sem = asyncio.Semaphore(3)
+        chunks = [order[i:i + 8] for i in range(0, len(order), 8)]
 
         async def run(chunk: list[int]) -> None:
-            async with sem:
-                blobs, last = None, None
-                for url in urls:
-                    try:
-                        blobs = await fetch_ranges(url, [(recs[i].start, recs[i].end) for i in chunk])
-                        break
-                    except FetchError as exc:
-                        last = exc
-                if blobs is None:
-                    raise last or FetchError("no mirror available")
-                self.stats["bytes_downloaded"] += sum(len(b) for b in blobs)
-                for i, blob in zip(chunk, blobs):
-                    grid, reg, a = await loop.run_in_executor(self.frames.pool, _decode_crop, blob, lat, lon, sm.core, sm.halo)
-                    out[i] = a
-                    meta[0], meta[1] = grid, reg
+            blobs, last = None, None
+            for url in urls:
+                try:
+                    blobs = await fetch_ranges(url, [(recs[i].start, recs[i].end) for i in chunk])
+                    break
+                except FetchError as exc:
+                    last = exc
+            if blobs is None:
+                raise last or FetchError("no mirror available")
+            self.stats["bytes_downloaded"] += sum(len(b) for b in blobs)
+            res = await asyncio.gather(*(loop.run_in_executor(self.pool, fn, blob, *args) for blob in blobs))
+            for i, r in zip(chunk, res):
+                out[i] = r
 
         await asyncio.gather(*(run(c) for c in chunks))
-        return out, meta[0], meta[1]
+        return out
 
 
 def _default_product(model_id: str) -> str:

@@ -158,6 +158,51 @@ def test_region_outside_domain():
         sky.region_for(grid, 51.5, -0.1, 128, 28)
 
 
+def test_coarse_fields_follow_the_full_ones():
+    """Temperature and wind come from one coarse, whole-domain copy per hour: resampled onto a region they
+    must agree with the full field there (a smooth field, to within the smoothing of a 36 km mean)."""
+    spec = {"type": "lambert", "ni": 1799, "nj": 1059, "la1": 21.138123, "lo1": -122.719528, "lov": -97.5,
+            "lad": 38.5, "latin1": 38.5, "latin2": 38.5, "dx": 3000.0, "dy": 3000.0, "jpos": 1}
+    grid = register_grid(spec)
+    f = sky.coarse_factor(spec)
+    assert f == 12
+    assert sky.coarse_factor({"type": "latlon", "dlon": 0.25, "dlat": 0.25}) == 2
+    assert sky.coarse_factor({"type": "latlon", "dlon": 1.0, "dlat": 1.0}) == 1
+    j, i = np.mgrid[0:grid.nj, 0:grid.ni].astype(np.float32)
+    full = 250.0 + 0.02 * i + 0.01 * j + 3.0 * np.sin(i / 90.0) * np.cos(j / 70.0)
+    h, w = (grid.nj // f) * f, (grid.ni // f) * f
+    coarse = full[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3))[None]
+    reg = sky.region_for(grid, 35.6, -82.55, 128, 28)
+    got = sky.from_coarse(coarse, f, reg)[0]
+    want = full[np.ix_(reg.jj, reg.ii)]
+    assert got.shape == want.shape
+    assert np.abs(got - want).max() < 0.05
+    # at the domain's edge the coarse grid is clamped, never read out of range
+    edge = sky.region_for(grid, 24.0, -80.6, 128, 28)
+    assert np.isfinite(sky.from_coarse(coarse, f, edge)).all()
+
+
+def test_parallel_decode_switch(monkeypatch):
+    from mammatus.data import frames
+    for env, expect in (("0", False), ("1", True)):
+        monkeypatch.setenv("MAMMATUS_PARALLEL_DECODE", env)
+        monkeypatch.setattr(frames, "_PARALLEL_DECODE", None)
+        assert frames.parallel_decode() is expect
+    # left alone, it goes by what the installed ecCodes says about itself (and remembers the answer)
+    monkeypatch.delenv("MAMMATUS_PARALLEL_DECODE")
+    monkeypatch.setattr(frames, "_PARALLEL_DECODE", None)
+    first = frames.parallel_decode()
+    assert first in (True, False) and frames.parallel_decode() is first
+
+
+def test_sky_fetches_only_what_it_draws():
+    """The fields a frame downloads: nothing whole-domain that the picture doesn't use."""
+    for dropped in ("pbl", "vis", "mcc", "hcc", "tcc", "ctop"):
+        assert dropped not in sky._F2D and dropped not in sky._F2D_CAM
+    assert {"psfc", "t2m", "d2m", "cape", "refc"} <= set(sky._F2D)
+    assert len(sky.T_LEVELS) <= 9 and len(sky.W_LEVELS) <= 4
+
+
 def test_profile_fallback():
     z = [100, 800, 1500, 3000, 5500, 9000, 10500]
     cover = [0, 0.9, 0.2, 0, 0, 0.6, 0]
@@ -167,6 +212,59 @@ def test_profile_fallback():
     assert head["estimated"] is True
     assert [ly["phase"] for ly in head["layers"]][-1] == "ice"
     assert head["precip"]["kind"] == "rain"
+
+
+JS_FLOW = r"""
+import fs from "node:fs";
+import { decodeFrame, flow, mergeBands, Loader } from "%(module)s";
+const read = (p) => { const raw = fs.readFileSync(p); return decodeFrame(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)); };
+const a = read("%(a)s"), b = read("%(b)s"), c = read("%(c)s");
+const bands = mergeBands([...a.bands, ...b.bands]);
+const out = { bands, filled: Array.from(a.filled).join(""), ab: flow(a, b, bands), ba: flow(b, a, bands), aa: flow(a, a, bands), ac: flow(a, c, mergeBands([...a.bands, ...c.bands])) };
+// the loader: one fetch per frame however often it is asked for, what is wanted now ahead of what was fetched in case
+const order = [];
+globalThis.fetch = async (url) => { order.push(url); await new Promise((r) => setTimeout(r, 5)); return { ok: false, status: 404, statusText: "nope", json: async () => ({ detail: "no such hour" }) }; };
+const L = new Loader();
+const ids = [1, 2, 3, 4, 5, 6, 7].map((h) => `gfs/2026112712/${h}@35.000,-82.000`);
+const ps = ids.map((id) => L.get(id, false).catch((e) => e.status));
+const again = L.get(ids[6], true).catch((e) => e.status);         // now wanted: jumps the queue
+out.status = await Promise.all([...ps, again]);
+out.fetched = order.map((u) => +u.split("/")[6].split("?")[0]);
+console.log(JSON.stringify(out));
+"""
+
+
+def test_browser_follows_clouds_between_hours(tmp_path):
+    """sky/data.js under Node: the shift it finds between two hours is how far the clouds moved."""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    paths = {}
+    for name, scene, drift in (("a", "fair", 0.0), ("b", "fair", 1.0), ("c", "clear", 0.0)):
+        paths[name] = tmp_path / f"{name}.bin"
+        paths[name].write_bytes(gzip.decompress(sky.pack(sky.synth_box(scene, drift), {})))
+    module = (Path(__file__).resolve().parents[1] / "mammatus/static/js/sky/data.js").as_posix()
+    script = tmp_path / "flow.mjs"
+    script.write_text(JS_FLOW % {"module": module, **{k: v.as_posix() for k, v in paths.items()}})
+    run = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, run.stderr[-2000:]
+    out = json.loads(run.stdout)
+    assert len(out["bands"]) == 2 and len(out["filled"]) == sky.NZ and "1" in out["filled"] and "0" in out["filled"]
+    # an hour of the demo's drift moves the fields 6 cells east-west and 1.5 north-south (3 km cells)
+    (lx, ly), (hx, hy) = out["ab"]
+    assert abs(abs(lx) - 18.0) < 2.5 and abs(abs(ly) - 4.5) < 2.5
+    assert abs(abs(hx) - 18.0) < 2.5
+    # backwards it is the same journey the other way, and a frame against itself (or against a clear sky) stays put
+    assert out["ba"][0][0] == pytest.approx(-lx, abs=1.5) and out["ba"][0][1] == pytest.approx(-ly, abs=1.5)
+    assert out["aa"] == [[0, 0], [0, 0]]
+    assert all(v == [0, 0] for v in out["ac"])
+    assert out["status"] == [404] * 8
+    assert sorted(out["fetched"]) == [1, 2, 3, 4, 5, 6, 7] and out["fetched"].index(7) == 4      # four under way, then the wanted one
 
 
 def test_sky_routes_need_login():

@@ -76,6 +76,7 @@ export class Legend {
     if (s.type === "radar") { cmapId = "mrms"; title = "Radar reflectivity"; desc = "NOAA MRMS merged composite."; }
     else {
       const p = app.catalog.products.find((x) => x.id === s.product);
+      if (!p) return;          // (a product this server doesn't have: a stale link or saved view)
       cmapId = p.cmap; title = p.name; desc = p.desc;
       if (p.method) desc += ` ${p.method}`;
     }

@@ -391,11 +391,25 @@ class App {
         if (!this.playing) return;
         this.timeline.setPlaying(true, false);
       }
+      // with the Sky view open the timeline keeps its pace: the next hour's sky is fetched before the step,
+      // and the step after waits until the clouds have finished moving into this one
+      const sky = this.sky?.isOpen ? this.sky : null;
+      if (sky) {
+        const wait = sky.ensure(L.steps[next].time);
+        let late = false;
+        const spin = setTimeout(() => { late = true; this.timeline.setPlaying(true, true); }, 250);
+        await wait;
+        clearTimeout(spin);
+        if (!this.playing) return;
+        if (late) this.timeline.setPlaying(true, false);
+      }
       const t0 = performance.now();
       await L.show(next);
       if (!this.playing) return;
       this.renderer.poke();
-      this._play = setTimeout(tick, Math.max(30, hold - (performance.now() - t0)));
+      if (sky?.isOpen) await sky.shown();
+      if (!this.playing) return;
+      this._play = setTimeout(tick, Math.max(sky ? 0 : 30, hold - (performance.now() - t0)));
     };
     this._play = setTimeout(tick, 60);
   }

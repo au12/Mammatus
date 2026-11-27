@@ -1,0 +1,51 @@
+// A 64 x 64 blue-noise mask (void-and-cluster, tileable): each value 0..255 appears equally often and
+// neighbours differ as much as they can. The Sky view offsets its ray starts and dithers with it, so the
+// sampling error stays fine-grained and never shows as stripes or clumps.
+const B64 =
+  "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" +
+  "kw==";
+
+export const BLUE_SIZE = 64;
+export function blueNoise() {
+  const s = atob(B64), a = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return a;
+}

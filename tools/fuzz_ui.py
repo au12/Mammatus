@@ -337,7 +337,7 @@ class Fuzzer:
             self.page.evaluate(f"window.mammatus.openSky({{ lat: {lat:.3f}, lon: {lon:.3f}, name: 'fuzz' }})")
             self.page.wait_for_timeout(rng.randint(200, 2500))
             return
-        what = rng.choice(["mode", "zoom", "drag", "point", "point", "key", "exit"])
+        what = rng.choice(["mode", "zoom", "drag", "point", "point", "key", "play", "step", "exit"])
         if what == "mode":
             self.page.keyboard.press("g")
         elif what == "zoom":
@@ -350,6 +350,17 @@ class Fuzzer:
             self.page.evaluate(f"window.mammatus.sky.setPoint({{ lat: {lat:.3f}, lon: {lon:.3f}, name: 'fuzz' }})")
         elif what == "key":
             self.page.keyboard.press(rng.choice(["+", "-", "ArrowLeft", "ArrowRight", "g"]))
+        elif what == "play":
+            # the timeline playing under the open sky (clouds carried from hour to hour), perhaps left running
+            self.page.evaluate("window.mammatus.togglePlay()")
+            self.page.wait_for_timeout(rng.randint(300, 2500))
+            if rng.random() < 0.6:
+                self.page.evaluate("window.mammatus.stopPlay()")
+        elif what == "step":
+            # hours stepped faster than any change between them can finish
+            for _ in range(rng.randint(2, 7)):
+                self.page.evaluate(f"window.mammatus.stepBy({rng.choice([-3, -1, 1, 1, 2, 5])})")
+                self.page.wait_for_timeout(rng.randint(0, 120))
         else:
             self.page.keyboard.press("Escape")
         self.page.wait_for_timeout(rng.randint(100, 1500))
@@ -372,6 +383,16 @@ class Fuzzer:
             try { decodePatch(b.buffer); } catch (e) { /* rejected cleanly */ }
           }
           if (app.sky) { app.sky.groundAt(junk(), junk()); }
+          // sky frames: junk bytes must be refused, and the motion estimate must survive empty frames
+          const { decodeFrame, flow } = await import("/js/sky/data.js");
+          for (let i = 0; i < 8; i++) {
+            const b = new Uint8Array(Math.floor(rnd() * 2048)); crypto.getRandomValues(b);
+            if (b.length > 16 && rnd() < 0.5) b.set([77, 77, 83, 49]);
+            try { decodeFrame(b.buffer); } catch (e) { /* rejected cleanly */ }
+          }
+          const blank = { aux: new Uint8Array(64 * 40 * 40 * 4) };
+          const v = flow(blank, blank, [[0, 2], [junk(), junk()]]);
+          if (!v.every((d) => d[0] === 0 && d[1] === 0)) throw new Error("flow of nothing is not zero");
           const { decodeChunk } = await import("/js/lightning.js");
           for (let i = 0; i < 20; i++) {
             const n = Math.floor(rnd() * 64);

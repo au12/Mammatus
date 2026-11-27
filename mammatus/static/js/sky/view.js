@@ -12,7 +12,7 @@ import { fmt, units, compass, toDisplay, label } from "../units.js";
 import { when } from "../time.js";
 import { decodeStars } from "../data/basemap.js";
 import { SkyRenderer, M4, norm, cross } from "./render.js";
-import { Loader, plan, frameIds, mergeBands, inConus, N, ZTOP } from "./data.js";
+import { Loader, plan, frameIds, mergeBands, flow, inConus, N, NZ, ZTOP } from "./data.js";
 import { fetchTerrain, modelTerrain, EARTH_R } from "./terrain.js";
 import * as A from "./astro.js";
 import { Storm } from "./bolts.js";
@@ -24,6 +24,13 @@ const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t
 const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const wrapDeg = (a) => ((a % 360) + 540) % 360 - 180;
 const DRIFT = 4;           // clouds drift at 4x real time
+const WRAP = 25.6 * 4096;  // km: the drift offsets start over here (days away), on a multiple of the noise's tiles
+const RISE = 0.016, EVOLVE = 0.03, FALL = 0.13;      // km/s: billowing of the cloud shapes, of their fine detail, falling rain
+const EXPOSURE = 3.3;      // daylight exposure: a sunlit cloud top just reaches white
+const DAY_SKY = 0.0214;    // the sky's mean radiance (per unit of sunlight) under a high sun, which that exposure is for
+const DUSK_SKY = 0.0004;    // ... and with the sun 3 degrees down
+const MOONLIGHT = 0.004;   // the full moon against the sun (really 400 times less again: this is a night you can see)
+const hermite = (t) => t * t * (3 - 2 * t);
 const H0 = 16.8;           // km of height shown at true scale (ground to just above 52,000 ft)
 
 const MEANING = {
@@ -65,6 +72,22 @@ export class SkyView {
     this.display = { A: null, B: null, mix: 0, morph: null };
     this.frames = new Map();    // key -> decoded frame
     this.blocked = new Set();
+    this.bandDrift = [];        // how far each height band's clouds have drifted
+    this.rise = 0; this.evo = 0; this.fall = 0;
+    this.flows = new Map();     // "A|B|bands" -> how far each band's clouds move between the two frames
+    this.waiters = [];
+  }
+
+  // Fetch the sky for a point before it is opened (the pointer is on the Sky button): by the time the camera
+  // has swooped in, the clouds are usually there.
+  prewarm(p) {
+    if (this.isOpen || !p || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) return;
+    try {
+      const lat = +p.lat.toFixed(3), lon = +p.lon.toFixed(3);
+      const st = this.app.layers.step();
+      const pl = plan(this.app, (st?.time || new Date()).getTime() / 1000, lat, lon, { source: this.app.prefs.skySource || "auto" });
+      for (const id of new Set(frameIds(pl, lat, lon))) this.loader.get(id).catch(() => {});
+    } catch { /* not ready yet */ }
   }
 
   // ---------------------------------------------------------------- open / close
@@ -135,6 +158,8 @@ export class SkyView {
     this.ambient(false);
     this.sound.stop();
     this.disableTilt();
+    for (const w of this.waiters) { clearTimeout(w.timer); w.resolve(); }      // (the timeline's play loop may be waiting on this sky)
+    this.waiters = [];
     if (!fromHistory && history.state?.sky) history.back();
     window.removeEventListener("popstate", this._onPop);
     window.removeEventListener("resize", this._onResize);
@@ -157,17 +182,28 @@ export class SkyView {
   }
 
   setPoint(p, first = false) {
-    this.p = { ...p, lat: +p.lat.toFixed(3), lon: +p.lon.toFixed(3) };
+    const lat = +p.lat.toFixed(3), lon = +p.lon.toFixed(3);
+    const moved = !this.p || this.p.lat !== lat || this.p.lon !== lon;
+    this.p = { ...p, lat, lon };
     this.blocked.clear();
-    this.display = { A: null, B: null, mix: 0, morph: null };
-    this.appear = { v: 0, t0: null };
-    this.cur = null;
+    // another place's clouds don't linger while this one's load: they evaporate at once, and everything said
+    // about them (layer names, winds, the freezing level, storms) goes with them
+    if (!first && this.display.A && moved) this.vanish = { t0: performance.now(), dur: reducedMotion() ? 1 : 240, D: { ...this.display, morph: null } };
+    if (moved || first) {
+      this.display = { A: null, B: null, mix: 0, morph: null };
+      this.appear = { v: 0, t0: null };
+      this.cur = null;
+      this.storm.setCells([], 12);
+      this.loader.drop((id) => id.endsWith(`@${lat.toFixed(3)},${lon.toFixed(3)}`));
+    }
     this.obs = null;
     this.heightOf = null;
     this.headingSet = false;
     this.cityGlow = null;
     this._hazeAt = 0;
+    this.tDisp = null;
     this.renderTitle();
+    this.renderLayers();
     this.loadTerrain();
     this.onTime();
     if (this.prefs.skyObs !== false) this.loadObserved();
@@ -249,23 +285,27 @@ export class SkyView {
   onTime() {
     if (!this.isOpen || !this.p) return;
     const t = this.currentTime();
+    const now = performance.now();
+    // the sun and moon move to the new time along with the clouds (a jump of many hours just jumps)
+    const dur = this.morphMs();
+    if (this.tDisp == null || Math.abs(t - this.tDisp) > 6.5 * 3600 || reducedMotion()) { this.tDisp = t; this.tAnim = null; }
+    else if (t !== this.t) this.tAnim = { from: this.tDisp, to: t, t0: now, dur };
     this.t = t;
     const pl = plan(this.app, t, this.p.lat, this.p.lon, { source: this.source, blocked: this.blocked });
     this.plan = pl;
     const [ida, idb] = frameIds(pl, this.p.lat, this.p.lon);
     this.want = { a: ida, b: idb, mix: pl.mix };
-    const quick = pl.kind === "model" && !this.loader.peek(ida, 1);
-    const load = (id) => {
-      if (quick) this.loader.get(id, 0).then((f) => this.got(f), () => {});
-      return this.loader.get(id, pl.kind === "model" ? 1 : 0).then((f) => this.got(f));
-    };
-    this.loading = true;
+    // a change already under way hurries up when something else is wanted now
+    const m = this.display.morph;
+    if (m && !this.app.playing) m.dur = Math.min(m.dur, now - m.t0 + 180);
+    const load = (id) => (this.frames.has(id) ? Promise.resolve() : this.loader.get(id).then((f) => this.got(f)));
+    this.loading = !(this.frames.has(ida) && this.frames.has(idb));
     this.renderStatus();
     Promise.all([load(ida), idb !== ida ? load(idb) : null]).then(() => {
-      if (this.want?.a === ida) { this.loading = false; this.renderStatus(); }
+      if (this.want?.a === ida && this.want?.b === idb) { this.loading = false; this.renderStatus(); }
       this.prefetch();
     }, (err) => {
-      if (this.want?.a !== ida) return;
+      if (this.want?.a !== ida || err.status === -1) return;
       this.loading = false;
       // that model can't do this point (outside its domain, not published, upstream trouble): fall back
       if (pl.kind === "model" && this.source === "auto" && [404, 502, 503, 0].includes(err.status ?? 0)) {
@@ -284,69 +324,119 @@ export class SkyView {
     this.kick();
   }
 
+  // how long a change of hour takes on screen: the timeline's own pace while it plays
+  morphMs() { return reducedMotion() ? 1 : (this.app.playing ? clamp(this.app.frameMs(), 120, 1500) : 650); }
+
+  // the hours either side of this one (further ahead while the timeline plays), fetched before they are asked for
   prefetch() {
     const L = this.app.layers;
-    if (this.amb || !L?.steps?.length) return;
-    const dir = this.app.playing ? 1 : 0;
-    for (const d of dir ? [1, 2, 3] : [1, -1]) {
-      const st = L.steps[L.index + d];
+    if (this.amb || !L?.steps?.length || !this.p) return;
+    const n = L.steps.length;
+    for (const d of this.app.playing ? [1, 2, 3, 4, 5] : [1, -1, 2, -2]) {
+      const st = L.steps[this.app.playing ? (L.index + d) % n : L.index + d];
       if (!st) continue;
       const pl = plan(this.app, st.time.getTime() / 1000, this.p.lat, this.p.lon, { source: this.source, blocked: this.blocked });
-      for (const id of new Set(frameIds(pl, this.p.lat, this.p.lon))) this.loader.get(id, pl.kind === "model" ? 1 : 0).catch(() => {});
+      for (const id of new Set(frameIds(pl, this.p.lat, this.p.lon))) if (!this.frames.has(id)) this.loader.get(id, false).then((f) => this.got(f), () => {});
     }
+  }
+
+  // For the timeline's play loop: resolves when the sky for that time is loaded (or can't be) ...
+  async ensure(date) {
+    if (!this.isOpen || !this.p || this.amb) return;
+    const pl = plan(this.app, date.getTime() / 1000, this.p.lat, this.p.lon, { source: this.source, blocked: this.blocked });
+    const ids = [...new Set(frameIds(pl, this.p.lat, this.p.lon))].filter((id) => !this.frames.has(id));
+    if (!ids.length) return;
+    await Promise.race([
+      Promise.all(ids.map((id) => this.loader.get(id).then((f) => this.got(f), () => {}))),
+      new Promise((r) => setTimeout(r, 20000)),
+    ]);
+  }
+
+  // ... and when the change to the current time has finished on screen
+  shown() {
+    if (!this.isOpen || this.amb) return Promise.resolve();
+    return new Promise((resolve) => {
+      const w = { resolve, timer: setTimeout(() => { this.waiters = this.waiters.filter((x) => x !== w); resolve(); }, 5000) };
+      this.waiters.push(w);
+      this.kick();
+    });
+  }
+
+  atTarget() {
+    const D = this.display, W = this.want;
+    if (!W || D.morph || this.vanish || !D.A) return false;
+    if (W.b === W.a || W.mix < 0.002) return D.A === W.a && D.mix < 0.002;
+    return D.A === W.a && D.B === W.b && Math.abs(D.mix - W.mix) < 0.004;
   }
 
   got(f) {
     if (!this.isOpen) return;
+    const cap = this.r.lowPower ? 24 : 48;
+    this.frames.delete(f.key);
     this.frames.set(f.key, f);
-    while (this.frames.size > 16) this.frames.delete(this.frames.keys().next().value);
+    for (const k of this.frames.keys()) {
+      if (this.frames.size <= cap) break;
+      if (k !== this.display.A && k !== this.display.B && k !== this.want?.a && k !== this.want?.b) this.frames.delete(k);
+    }
     this.r.frame(f.key, f);
     if (this.demFailed && this.isHere(f)) this.useModelTerrain(f);
     this.kick();
   }
 
-  // the best loaded version (full volume, else the quick sketch) of a frame id
-  best(id) {
-    if (!id) return null;
-    for (const d of [1, 0]) if (this.frames.has(`${id}#${d}`)) return `${id}#${d}`;
-    return null;
-  }
+  best(id) { return id && this.frames.has(id) ? id : null; }
 
-  // move what's displayed toward what's wanted, with a morph so clouds grow and fade instead of popping
+  // Move what's displayed toward what's wanted. Between two hours the clouds are carried along (each band by
+  // how far its clouds really moved between the two) while one hour's cover turns into the other's, so they
+  // travel, grow and thin instead of one picture fading out and another in.
   updateDisplay(now) {
     const D = this.display;
+    if (this.vanish) {
+      if (now - this.vanish.t0 < this.vanish.dur) return true;
+      this.vanish = null;
+    }
     if (D.morph) {
       const m = D.morph;
       const u = clamp((now - m.t0) / m.dur, 0, 1);
-      D.mix = lerp(m.from, m.to, ease(u));
-      if (u >= 1) {
-        D.morph = null;
-        if (m.collapse) { D.A = D.B; D.mix = 0; }
-      }
-      return true;
+      D.mix = lerp(m.from, m.to, m.linear ? u : hermite(u));
+      if (u < 1) return true;
+      D.morph = null;
+      if (D.mix > 0.998) { D.A = D.B; D.mix = 0; }         // arrived: showing just that hour now
+      else if (D.mix < 0.002) { D.B = D.A; D.mix = 0; }
     }
-    if (!this.want) return false;
-    const ta = this.best(this.want.a), tb = this.best(this.want.b) || ta;
-    if (!ta) return false;
-    const dur = this.app.playing ? 380 : 900;
+    const W = this.want;
+    if (!W) return false;
+    const pair = W.b !== W.a && W.mix > 0.002;
+    const ta = this.best(W.a), tb = pair ? this.best(W.b) : ta;
+    if (!ta || !tb) return false;
+    const playing = !!this.app.playing;
+    // (while the timeline plays, each step's change takes the whole step, so the motion never pauses)
+    const go = (from, to, dur = this.morphMs()) => { D.morph = { t0: now, dur: Math.max(1, playing ? dur : dur * Math.max(0.4, Math.abs(to - from))), from, to, linear: playing }; };
     if (!D.A) {
-      D.A = ta; D.B = tb; D.mix = tb === ta ? 0 : this.want.mix;
+      D.A = ta; D.B = tb; D.mix = pair ? W.mix : 0;
       this.onShown(true);
       return true;
     }
-    const single = tb === ta || this.want.mix < 0.002;
-    if (single) {
-      if (D.A === ta && (D.mix < 0.002 || D.B === ta)) return false;
-      const from = D.mix > 0.5 ? D.B : D.A;
-      D.A = from; D.B = ta; D.mix = 0;
-      D.morph = { t0: now, dur, from: 0, to: 1, collapse: true };
+    if (!pair) {
+      if (D.A === ta && D.mix < 0.002) return false;
+      if (D.A === ta) go(D.mix, 0);
+      else if (D.B === ta && D.mix > 0.002) go(D.mix, 1);
+      else {
+        // from whichever of the two showing is the nearer
+        if (D.mix > 0.5) D.A = D.B;
+        D.B = ta; D.mix = 0;
+        go(0, 1);
+      }
     } else if (D.A === ta && D.B === tb) {
-      if (Math.abs(D.mix - this.want.mix) < 0.004) return false;
-      D.morph = { t0: now, dur: 300, from: D.mix, to: this.want.mix };
+      if (Math.abs(D.mix - W.mix) < 0.004) return false;
+      go(D.mix, W.mix);
+    } else if (D.A === tb && D.B === ta && D.mix > 0.002) {
+      D.A = ta; D.B = tb; D.mix = 1 - D.mix;
+      go(D.mix, W.mix);
     } else {
       const from = D.mix > 0.5 ? D.B : D.A;
-      if (from === ta) { D.A = ta; D.B = tb; D.morph = { t0: now, dur, from: 0, to: this.want.mix }; }
-      else { D.A = from; D.B = ta; D.mix = 0; D.morph = { t0: now, dur, from: 0, to: 1, collapse: true }; }
+      if (from === ta) { D.A = ta; D.B = tb; D.mix = 0; go(0, W.mix); }
+      else if (from === tb) { D.A = ta; D.B = tb; D.mix = 1; go(1, W.mix); }
+      else { D.A = from; D.B = W.mix < 0.5 ? ta : tb; D.mix = 0; go(0, 1); }      // to the nearer of the pair, then between them
     }
     this.onShown(false);
     return true;
@@ -355,12 +445,13 @@ export class SkyView {
   // the frame that dominates the display changed: labels, storm cells, sounds
   onShown(first) {
     const D = this.display;
-    const key = D.morph?.collapse ? D.B : (D.mix > 0.5 ? D.B : D.A);
+    const key = D.morph ? (D.morph.to > 0.5 ? D.B : D.A) : (D.mix > 0.5 ? D.B : D.A);
     const f = this.frames.get(key);
-    if (!f) return;
+    if (!f || f === this.cur) return;
     this.cur = f;
     const hd = f.head;
-    if (first && !this.appear.t0) this.appear.t0 = performance.now() + (this.intro && this.intro.dir > 0 ? Math.max(0, this.intro.dur * 0.55 - (performance.now() - this.intro.t0)) : 0);
+    // the clouds condense in as the camera arrives (or at once, at a new place)
+    if (first && !this.appear.t0) this.appear.t0 = performance.now() + (this.intro && this.intro.dir > 0 ? Math.max(0, this.intro.dur * 0.5 - (performance.now() - this.intro.t0)) : 0);
     const anvilTop = Math.max(0, ...hd.layers.filter((l) => l.genus === "Cb").map((l) => l.top / 1000));
     this.storm.setCells(hd.cells, anvilTop || 12);
     this.renderLayers();
@@ -370,38 +461,85 @@ export class SkyView {
     if (!this.headingSet) { this.view.heading = this.defaultHeading(); this.headingSet = true; }
   }
 
+  // How far each band's clouds move between two frames (see flow() in data.js), with the wind there as the
+  // first guess. Only for neighbouring hours of the same model: across a longer gap the clouds just change.
+  flowFor(fa, fb, bands) {
+    const key = `${fa.key}|${fb.key}|${bands.map((b) => b.join("-"))}`;
+    let v = this.flows.get(key);
+    if (v) return v;
+    const ta = Date.parse(fa.head.valid), tb = Date.parse(fb.head.valid);
+    const dt = Number.isFinite(ta) && Number.isFinite(tb) ? (tb - ta) / 1000 : 0;
+    if (fa.head.model !== fb.head.model || !dt || Math.abs(dt) > 3.2 * 3600) v = bands.map(() => [0, 0]);
+    else {
+      const guess = bands.map((b) => { const w = bandWind(fa, b); return [w[0] * dt / 1000 * 0.7, w[1] * dt / 1000 * 0.7]; });
+      v = flow(fa, fb, bands, guess);
+    }
+    this.flows.set(key, v);
+    while (this.flows.size > 60) this.flows.delete(this.flows.keys().next().value);
+    return v;
+  }
+
+  // Each height band's clouds drift with the wind there, as one body (a tower isn't sheared apart by the
+  // wind changing with height inside it). A band keeps its drift when the bands around it change.
+  stepDrift(dt, bands, fa, fb, mix) {
+    const prev = this.bandDrift;
+    const next = bands.map((b) => {
+      // the old band this one mostly is
+      let from = null, ov = 0;
+      for (const d of prev) {
+        const o = Math.min(b[1], d.z1) - Math.max(b[0], d.z0);
+        if (o > ov) { ov = o; from = d; }
+      }
+      if (!from && prev.length) from = prev.reduce((m, d) => (Math.abs((d.z0 + d.z1) - (b[0] + b[1])) < Math.abs((m.z0 + m.z1) - (b[0] + b[1])) ? d : m));
+      const d = from ? { ...from } : { x: 0, y: 0, run: 0, dx: 1, dy: 0 };
+      d.z0 = b[0]; d.z1 = b[1];
+      let w = fa ? bandWind(fa, b) : [0, 0];
+      if (fb && fb !== fa && mix > 0.002) { const w2 = bandWind(fb, b); w = [lerp(w[0], w2[0], mix), lerp(w[1], w2[1], mix)]; }
+      const sp = Math.hypot(w[0], w[1]);
+      d.vx = w[0] * dt * DRIFT / 1000; d.vy = w[1] * dt * DRIFT / 1000;
+      d.x = (d.x + d.vx + WRAP) % WRAP; d.y = (d.y + d.vy + WRAP) % WRAP;
+      d.run = (d.run + sp * dt * DRIFT / 1000) % WRAP;
+      // the way the wind blows (cirrus is combed along it), turning gradually
+      if (sp > 0.5) {
+        const k = from ? 1 - Math.exp(-dt / 2.5) : 1;
+        const nx = lerp(d.dx, w[0] / sp, k), ny = lerp(d.dy, w[1] / sp, k), nl = Math.hypot(nx, ny) || 1;
+        d.dx = nx / nl; d.dy = ny / nl;
+      }
+      return d;
+    });
+    this.bandDrift = next;
+    this.rise = (this.rise + dt * RISE) % (25.6 * 64);
+    this.evo = (this.evo + dt * EVOLVE) % 0.8;
+    this.fall = (this.fall + dt * FALL) % 51.2;
+    return next;
+  }
+
   // ---------------------------------------------------------------- environment (sun, moon, light)
   env() {
-    const t = new Date(this.t * 1000);
+    const t = new Date((this.tDisp ?? this.t) * 1000);
     const { lat, lon } = this.p;
     const sun = A.sun(t, lat, lon), moon = A.moon(t, lat, lon);
     const sunDir = A.dirOf(sun.az, sun.el), moonDir = A.dirOf(moon.az, moon.el);
     const day = A.daylight(sun.el);
-    const night = 1 - smooth(-14, -3, sun.el);
+    const night = 1 - smooth(-14, -4, sun.el);
     const elev = (this.cur?.head.elev || 0) / 1000;
     const moonUp = smooth(-1, 3, moon.el) * (0.15 + 0.85 * moon.illum);
-    const useSun = sun.el > -7 || moonUp < 0.02;
+    // the sun lights the clouds until its last light has left even the highest of them; then the moon fades in
+    const useSun = sun.el > -7.5 || moonUp < 0.02;
     const lightEl = useSun ? sun.el : moon.el;
-    const tint = useSun ? [1, 1, 1] : [0.78, 0.86, 1.0];
-    const lightI = useSun ? 1 : 0.06 * moonUp;
+    const tint = useSun ? [1, 1, 1] : [0.74, 0.84, 1.0];
+    const lightI = useSun ? 1 : MOONLIGHT * moonUp * smooth(-7.5, -10.5, sun.el);
     const lut = new Float32Array(64 * 4);
     for (let i = 0; i < 64; i++) {
       const c = A.sunlight(lightEl, (i / 63) * 20);
       lut.set([c[0] * tint[0], c[1] * tint[1], c[2] * tint[2], 1], i * 4);
     }
     const sunCol = A.sunlight(sun.el, elev + (this.camZ || 0));
-    // skylight from above and light bounced off the ground
-    const golden = smooth(-6, 2, sun.el) * (1 - smooth(4, 18, sun.el));
-    const sky = [0.33 * day + 0.004, 0.47 * day + 0.006, 0.86 * day + 0.012].map((x, i) => x * (1 - golden * 0.35) + golden * [0.42, 0.28, 0.36][i] * 0.6);
-    const moonAmb = moonUp * 0.012;
-    const ambTop = sky.map((x, i) => x * 0.95 + moonAmb * [0.6, 0.7, 1][i]);
-    const s0 = Math.max(Math.sin(sun.el * DEG), 0);
-    const ground = [0.16, 0.15, 0.12];
-    // cloud bases see the ground's bounce and the horizon sky
-    const ambBot = ground.map((g, i) => g * (sunCol[i] * s0 * 1.2 + sky[i] * 0.5) + sky[i] * 0.3 + moonAmb * 0.3);
+    const golden = smooth(-6, 1, sun.el) * (1 - smooth(4, 16, sun.el));
     const glow = this.cityGlow ?? 0.2;
-    const cityCol = [1.0, 0.56, 0.24].map((x) => x * glow * 0.05 * night);
-    const exposure = lerp(1.0, 4.2, night) * lerp(1, 1.2, golden);
+    const moonK = MOONLIGHT * moonUp * night;
+    // airglow, and a town's light in the air above it
+    const nightAir = [1.0e-5, 1.3e-5, 2.2e-5].map((x, i) => (x + [9e-5, 5e-5, 2.2e-5][i] * glow) * night);
     const sfc = this.cur?.head.sfc || {};
     // How far you can see along the ground follows the humidity there: about 180 km in dry air, 60 km at
     // 70 %, under 20 km when it is nearly saturated. (Real ranges on the horizon deserve honest air.)
@@ -416,20 +554,74 @@ export class SkyView {
     const dtH = Math.min(1, (nowMs - (this._hazeAt || 0)) / 600);
     this._haze = this._haze == null || !this._hazeAt ? hazeLow : lerp(this._haze, hazeLow, dtH);
     this._hazeAt = nowMs;
+    const mie = Math.round(clamp(0.55 + 0.75 * this._haze, 0.6, 2.2) * 20) / 20;
+    // Exposure, the way an eye or a camera sets it: by how bright the sky is. Set for a sunlit cloud top to
+    // just reach white by day, it opens up as the light goes (not quite keeping pace: dusk looks like dusk)
+    // so that the afterglow, a moonlit night and a starry one are all seen, each darker than the last.
+    const hEye = (this.camZ || 0) + elev;
+    const sky = this.r.skyBrightness(mie, hEye < 0.25 ? 0.02 : Math.min(12, 2 ** Math.round(Math.log2(hEye))));
+    const lum = sky(sun.el) + moonK * sky(moon.el) + 0.2126 * nightAir[0] + 0.7152 * nightAir[1] + 0.0722 * nightAir[2];
+    // (and under an overcast, from the ground, it opens further, as eyes do on a grey day)
+    const dull = lerp(1, Math.min(3, Math.pow(this.overcast(), -0.9)), this.grounded || 0);
+    // (down to deep twilight it nearly keeps pace; below that it gives ground, and night is dark)
+    const open = lum > DUSK_SKY ? Math.pow(DAY_SKY / lum, 0.85) : Math.pow(DAY_SKY / DUSK_SKY, 0.85) * Math.pow(DUSK_SKY / lum, 0.25);
+    const exposure = Math.min((this.tune?.exposure ?? EXPOSURE) * open * dull, 400);
     const snowing = this.cur?.head.precip?.kind === "snow";
     const snow = (sfc.t2m != null && sfc.t2m < 272.5 && (snowing || Math.abs(lat) > 40)) ? (snowing ? 0.75 : 0.35) : 0;
-    // equatorial -> local sky, for the stars
+    // equatorial -> local sky, for the stars (and back, for the Milky Way)
     const d = t.getTime() / 86400000 + 2440587.5 - 2451545.0;
     const lst = (((280.46061837 + 360.98564736629 * d) % 360) + lon) * DEG;
     const ph = lat * DEG;
     const cl = Math.cos(lst), sl = Math.sin(lst), cp = Math.cos(ph), sp = Math.sin(ph);
     // columns: images of the equatorial x, y, z axes in (east, north, up)
     const eq = new Float32Array([-sl, -sp * cl, cp * cl, cl, -sp * sl, cp * sl, 0, cp, sp]);
+    const eqInv = new Float32Array([eq[0], eq[3], eq[6], eq[1], eq[4], eq[7], eq[2], eq[5], eq[8]]);
+    // the side view's backdrop, redrawn when the sun has moved
+    const moonF = moon.illum * smooth(-2, 15, moon.el);
+    const rampKey = `${sun.el.toFixed(2)}|${moonF.toFixed(2)}|${glow.toFixed(2)}`;
+    if (rampKey !== this._rampKey) {
+      this._rampKey = rampKey;
+      this._ramp = backdropRamp(sun.el, moonF, glow);
+      // the backdrop's own light on the clouds in front of it: its colour through the troposphere, and near the ground
+      const mean = (z0, z1) => {
+        const c = [0, 0, 0];
+        let n = 0;
+        for (let i = Math.round(z0 / 18 * 255); i <= Math.round(z1 / 18 * 255); i++, n += 2) for (let k = 0; k < 3; k++) c[k] += this._ramp[i * 4 + k] + this._ramp[(256 + i) * 4 + k];
+        return c.map((x) => x / n * 0.35);
+      };
+      this._stDome = mean(1.5, 13);
+      this._stRim = mean(0, 4);
+    }
     return {
-      light: useSun ? sunDir : moonDir, lightI, sunDir, sunCol, moonDir, moonCol: [0.9, 0.92, 1.0].map((x) => x * 0.55),
-      moonIllum: moon.illum, night, ambTop, ambBot, cityCol, exposure, lut, elev, lat, lon, snow, cityGlow: glow,
-      starVis: Math.pow(night, 2) * (1 - 0.5 * moonUp), rays: day * 0.9, eq, sun, moon, hazeLow: this._haze,
+      light: useSun ? sunDir : moonDir, lightI, sunDir, sunCol, moonDir,
+      moonCol: [0.96, 0.94, 0.9].map((x) => x * 1.25 / exposure), moonIllum: moon.illum, moonK, night, nightAir,
+      cityCol: [1.0, 0.56, 0.24].map((x) => x * glow * 0.2 * night / exposure),
+      flashCol: [0.8, 0.84, 1.0].map((x) => x * 60 / exposure),
+      exposure, starGain: 4.2 / exposure, lut, elev, lat, lon, snow, cityGlow: glow, groundAlb: 0.16 + 0.5 * snow,
+      starVis: Math.pow(night, 2) * (1 - 0.5 * moonUp), rays: day * 0.9, eq, eqInv, sun, moon, hazeLow: this._haze,
+      mie, fill: this.openSky(), stDome: this._stDome, stRim: this._stRim,
+      sunAbove: smooth(-2.5, 2.5, lightEl), ramp: this._ramp, rampKey, grade: 1, golden,
     };
+  }
+
+  // how much of the sky is open (not under cloud) around the point: 1 clear, 0 under an overcast
+  openSky() {
+    let open = 1;
+    for (const L of this.cur?.head.layers || []) open *= 1 - clamp(L.cover, 0, 1) * (L.genus === "Ci" || L.genus === "Cs" || L.genus === "Cc" ? 0.3 : 1);
+    this._open = this._open == null ? open : lerp(this._open, open, 0.05);
+    return clamp(this._open * 1.15, 0, 1);
+  }
+
+  // how much of the daylight the cloud overhead lets through to the ground (1 clear .. about 0.1 under a storm)
+  overcast() {
+    let t = 1;
+    for (const L of this.cur?.head.layers || []) {
+      const per = { Cu: 50, TCu: 60, Cb: 60, Ci: 0.5, Cs: 0.5, Cc: 0.5 }[L.genus] ?? 15;
+      const tau = per * Math.max(0.1, (L.top - L.base) / 1000), c = clamp(L.cover, 0, 1);
+      t *= 1 - c * c * (1 - 1 / (1 + 0.11 * tau));
+    }
+    this._dull = this._dull == null ? t : lerp(this._dull, t, 0.05);
+    return clamp(this._dull, 0.05, 1);
   }
 
   defaultHeading() {
@@ -563,6 +755,7 @@ export class SkyView {
     // From the ground the earth curves away under distant country (a range 200 km off stands 2.7 km lower
     // against the horizon). The side view is a diagram at true scale, so there the ground stays level.
     this.curve = grounded / (2 * EARTH_R);
+    this.grounded = grounded;
     c.vp = M4.mul(c.proj, c.view);
     c.invVP = M4.inv(c.vp);
     c.cut = cut;
@@ -572,6 +765,15 @@ export class SkyView {
     c.refDist = refDist;
     c.far = 880;
     this.camZ = c.pos[2];
+    // The side view's lens is far too long to show the night sky (a few degrees of it, at the horizon), so
+    // there the stars are seen through a wide one looking up the same way.
+    const sh = Math.atan2(c.fwd[0], c.fwd[1]), sa = 34 * DEG;
+    const sf = [Math.sin(sh) * Math.cos(sa), Math.cos(sh) * Math.cos(sa), Math.sin(sa)];
+    const sr = [Math.cos(sh), -Math.sin(sh), 0], su = cross(sr, sf);
+    c.starCam = new Float32Array([...sr, ...su, ...sf]);
+    c.starVP = stylize > 0.5 ? M4.mul(M4.persp(2 * Math.atan(0.55), aspect, 0.5, 6000, 0), M4.lookDir([0, 0, 0], sf, [0, 0, 1])) : null;
+    // (the two skies swap half way through a zoom or a change of view: the stars dim across the swap)
+    c.starFade = stylize > 0 && stylize < 1 ? smooth(0, 0.3, Math.abs(stylize - 0.5)) : 1;
     return c;
   }
 
@@ -586,7 +788,7 @@ export class SkyView {
     if (!this.isOpen || document.hidden) return;
     const motion = !reducedMotion();
     const dt = this.lastNow ? Math.min(0.25, (now - this.lastNow) / 1000) : 0;
-    let busy = false;
+    let busy = !this.r.ready;
     if (this.intro) {
       busy = true;
       if (now - this.intro.t0 >= this.intro.dur) this.intro = null;
@@ -595,16 +797,24 @@ export class SkyView {
     const rising = this.stepRelief(now);
     if (rising) busy = true;
     const changed = this.updateDisplay(now);
-    if (changed || this.display.morph) busy = true;
+    if (changed || this.display.morph || this.vanish) busy = true;
+    if (this.tAnim) {
+      const a = this.tAnim, u = clamp((now - a.t0) / a.dur, 0, 1);
+      this.tDisp = lerp(a.from, a.to, this.app.playing ? u : hermite(u));
+      if (u >= 1) this.tAnim = null;
+      busy = true;
+    }
     if (this.appear.t0) {
-      const a = clamp((now - this.appear.t0) / (reducedMotion() ? 1 : 1700), 0, 1);
-      if (a < 1) busy = true;
+      const a = clamp((now - this.appear.t0) / (reducedMotion() ? 1 : 950), 0, 1);
+      if (a < 1 || this.appear.v < 1) busy = true;
       this.appear.v = a;
+    }
+    if (this.waiters.length && this.atTarget()) {
+      for (const w of this.waiters) { clearTimeout(w.timer); w.resolve(); }
+      this.waiters = [];
     }
     const interacting = now - this.lastInteract < 180 || this.fling;
     if (this.fling) this.stepFling(dt);
-    // drift clock: real time sped up, frozen for reduced motion
-    if (motion) this.driftT = (this.driftT || 0) + dt * DRIFT;
     this.storm.update(now, dt, (x, y) => this.groundAt(x, y));
     this.pullRealLightning();
     const fl = this.storm.frame(now);
@@ -617,14 +827,20 @@ export class SkyView {
       this.dirty = false;
       try {
         // with nothing loaded yet the empty sky still draws, so the swoop happens
-        this.draw(now, { moving: interacting || !!this.intro || !!this.modeAnim || rising || !this.display.A, dataChanged: !!this.display.morph || changed || fl.lights.length > 0, flashes: fl.lights, bolts: fl.bolts });
+        this.draw(now, {
+          moving: interacting || !!this.intro || !!this.modeAnim || rising,
+          dataChanged: !!this.display.morph || changed || !!this.vanish || (this.appear.t0 && this.appear.v < 1) || !!this.tAnim || fl.lights.length > 0,
+          flashes: fl.lights, bolts: fl.bolts,
+        });
         this.fails = 0;
       } catch (err) {
         if (!this.fails) console.error("Mammatus: sky view failed to draw", err);
         this.fails = (this.fails || 0) + 1;
         if (this.fails > 30) { toastError(err, "The Sky view can't draw on this device"); this.exit(); return; }
       }
-      if (this.display.A) this.adapt(now);
+      // how long frames really take, while they come one after another
+      if ((busy || interacting) && this.lastDraw && now - this.lastDraw < 120) this.pace = lerp(this.pace ?? 16.7, now - this.lastDraw, 0.12);
+      if (this.display.A) this.adapt(now, busy || interacting);
       this.lastDraw = now;
     }
     this.lastNow = now;
@@ -639,12 +855,24 @@ export class SkyView {
     if (!this.splashGone) { this.splashGone = true; const sp = document.getElementById("splash"); if (sp && !sp.classList.contains("gone")) { sp.classList.add("gone"); setTimeout(() => sp.remove(), 1400); } }
     const cam = this.camera(now);
     const e = this.env();
+    e.starVis *= cam.starFade;
     this.r.setSunLUT(e.lut);
-    const D = this.display;
+    // what is showing: this place's clouds, or the last place's on their way out
+    const V = this.vanish;
+    const D = V ? V.D : this.display;
     const fa = this.frames.get(D.A), fb = this.frames.get(D.B);
-    if (fa && this._windKey !== D.A) { this.r.setWind(fa.wind); this._windKey = D.A; }
-    const bands = mergeBands([...(fa?.bands || []), ...(fb && D.mix > 0.002 ? fb.bands : [])]);
-    const mam = Math.max(fa?.head.mammatus || 0, D.mix > 0.002 ? fb?.head.mammatus || 0 : 0);
+    if (fa) this.r.frame(D.A, fa);
+    if (fb && fb !== fa) this.r.frame(D.B, fb);
+    const two = !!fb && fb !== fa && (D.mix > 0.002 || !!D.morph);
+    const bands = mergeBands([...(fa?.bands || []), ...(two ? fb.bands : [])]);
+    const mam = Math.max(fa?.head.mammatus || 0, two ? fb.head.mammatus || 0 : 0);
+    const occ = new Uint8Array(NZ);
+    if (fa) for (let k = 0; k < NZ; k++) occ[k] = fa.filled[k] | (two ? fb.filled[k] : 0);
+    const adv = two ? this.flowFor(fa, fb, bands) : null;
+    const dt = !reducedMotion() && this._driftAt ? Math.min(0.12, (now - this._driftAt) / 1000) : 0;
+    this._driftAt = now;
+    const drift = this.stepDrift(dt, bands, fa, two ? fb : null, D.mix);
+    const appear = V ? 1 - hermite(clamp((now - V.t0) / V.dur, 0, 1)) : this.appear.v;
     // side view: a storm cell standing in the cut-away part still flashes, on the face of the cut
     if (cam.cut[3] > 0.5 && (flashes?.length || bolts?.length)) {
       const [nx, ny, cz] = cam.cut;
@@ -659,8 +887,11 @@ export class SkyView {
       });
     }
     const s = {
-      cam, env: e, time: this.driftT || 0, moving, dataChanged,
-      weather: { a: D.A, b: D.B || D.A, mix: D.mix, appear: this.appear.v, mammatus: mam, bands, ext: 0.4 },
+      cam, env: e, moving, dataChanged,
+      weather: {
+        a: D.A, b: D.B || D.A, mix: two ? D.mix : 0, adv, occ, appear, mammatus: mam, bands, drift,
+        rise: this.rise, evo: this.evo, fall: this.fall, ext: this.tune?.ext ?? 1, morphing: !!D.morph,
+      },
       ground: { relief: this.relief, curve: this.curve || 0 },
       flashes, bolts,
     };
@@ -669,15 +900,24 @@ export class SkyView {
     this.placeOverlay(cam);
   }
 
+  // draw a few more frames right now (a still picture needs the 2x2 cycle to come round)
+  settle(n = 8) {
+    for (let i = 0; i < n; i++) {
+      const fl = this.storm.frame(performance.now());
+      this.draw(performance.now(), { moving: false, dataChanged: false, flashes: fl.lights, bolts: fl.bolts });
+    }
+  }
+
   // keep the frame time in budget by trading cloud resolution
-  adapt(now) {
-    const ms = this.r.stats.ms;
+  adapt(now, continuous) {
     this._adaptT ||= now;
     if (now - this._adaptT < 1500) return;
     this._adaptT = now;
+    const ms = this.r.stats.ms;
     const budget = this.r.lowPower ? 22 : 14;
-    if (ms > budget * 1.25) this.r.setScale(this.r.scale - 0.06);
-    else if (ms < budget * 0.55) this.r.setScale(this.r.scale + 0.04);
+    // too slow: frames arriving late while animating, or the drawing itself over budget
+    if ((continuous && this.pace > 27) || ms > budget * 1.25) { this.r.setScale(this.r.scale - 0.07); this.pace = 16.7; }
+    else if (ms < budget * 0.5 && !(continuous && this.pace > 19)) this.r.setScale(this.r.scale + 0.04);
   }
 
   // ---------------------------------------------------------------- interaction
@@ -860,11 +1100,28 @@ export class SkyView {
     this.statusEl.textContent = text || clear;
     this.statusEl.classList.toggle("on", !!(text || clear));
     this.statusEl.classList.toggle("err", !!msg);
+    this.statusEl.classList.toggle("busy", !msg && !!loadingTxt);
   }
 
   renderLayers() {
     const hd = this.cur?.head;
-    if (!hd || !this.layersEl) return;
+    if (!this.layersEl) return;
+    if (!hd) {
+      // nothing known about this sky yet
+      this.layerTags = [];
+      this.winds = [];
+      this.frz = null;
+      this.layersEl.replaceChildren();
+      this.windEl.replaceChildren();
+      this.obsEl.replaceChildren();
+      this.frzEl.firstChild.textContent = "";
+      this.groundList.replaceChildren(h("h6", {}, "Overhead"), h("small", { class: "wait" }, "Loading…"));
+      this.card?.remove();
+      this.card = null;
+      this._ovSig = null;
+      this.dirty = true;
+      return;
+    }
     this.layerTags = hd.layers.map((L) => {
       const el = h("button", { class: `sky-tag g-${L.genus}`, title: L.name, onclick: (e) => { e.stopPropagation(); this.showLayer(L); } },
         h("i", {}), h("b", {}, L.name), h("small", {}, heightRange(L.base, L.top)));
@@ -1103,7 +1360,7 @@ export class SkyView {
   }
 
   async _saveImage() {
-    const blob = await this.r.snapshot(this.lastState);
+    const blob = await this.r.snapshot(this.lastState, 16);
     if (!blob) throw new Error("The picture couldn't be captured");
     const img = await createImageBitmap(blob);
     const c = document.createElement("canvas");
@@ -1181,6 +1438,79 @@ export class SkyView {
     if (this.amb) this.ambientPoke();
     return false;
   }
+}
+
+// the mean wind (m/s east, north) over a height band of a frame
+function bandWind(f, [z0, z1]) {
+  const u = f.head.profile.u, v = f.head.profile.v;
+  const k0 = clamp(Math.floor(z0 / 0.25), 0, NZ - 1), k1 = clamp(Math.ceil(z1 / 0.25) - 1, k0, NZ - 1);
+  let su = 0, sv = 0;
+  for (let k = k0; k <= k1; k++) { su += u[k] || 0; sv += v[k] || 0; }
+  return [su / (k1 - k0 + 1), sv / (k1 - k0 + 1)];
+}
+
+// The side view's backdrop: the colours of the atmosphere by altitude (0 to 18 km), for the half of the sky
+// away from the sun and the half toward it. By day pale blue near the ground deepening through blue and
+// violet to the black of space; at sunrise and sunset fire and rose toward the sun under a violet sky, the
+// Belt of Venus and the earth's blue shadow opposite it; indigo with a last ember on the horizon in twilight;
+// navy at night. Written as display colours (what the screen should show; the renderer divides by its exposure),
+// blended and interpolated in that space with a curve that has no flat spots, so there are no bands where one
+// stop hands over to the next.
+const RAMP_Z = [0, 1.5, 3.5, 6, 9, 12, 15, 18];
+const RAMPS = {
+  day: [[0.50, 0.66, 0.82], [0.40, 0.60, 0.84], [0.26, 0.49, 0.82], [0.13, 0.34, 0.74], [0.045, 0.17, 0.60], [0.022, 0.05, 0.36], [0.018, 0.012, 0.16], [0.002, 0.001, 0.012]],
+  goldTo: [[1.0, 0.50, 0.14], [0.92, 0.36, 0.14], [0.70, 0.24, 0.22], [0.40, 0.17, 0.36], [0.16, 0.11, 0.42], [0.05, 0.05, 0.28], [0.014, 0.010, 0.11], [0.0015, 0.001, 0.008]],
+  goldAway: [[0.40, 0.40, 0.54], [0.52, 0.37, 0.46], [0.43, 0.33, 0.52], [0.24, 0.26, 0.56], [0.10, 0.14, 0.50], [0.035, 0.05, 0.30], [0.012, 0.010, 0.12], [0.0015, 0.001, 0.008]],
+  twiTo: [[0.62, 0.21, 0.07], [0.37, 0.12, 0.10], [0.16, 0.07, 0.15], [0.07, 0.05, 0.17], [0.03, 0.035, 0.14], [0.013, 0.014, 0.08], [0.005, 0.004, 0.035], [0.001, 0.0008, 0.004]],
+  twiAway: [[0.07, 0.08, 0.17], [0.11, 0.08, 0.18], [0.08, 0.07, 0.19], [0.05, 0.05, 0.17], [0.028, 0.03, 0.13], [0.012, 0.013, 0.075], [0.005, 0.004, 0.035], [0.001, 0.0008, 0.004]],
+  night: [[0.0042, 0.0054, 0.0102], [0.0036, 0.0046, 0.0096], [0.003, 0.0039, 0.0084], [0.0023, 0.0029, 0.0068], [0.0016, 0.0019, 0.0048], [0.001, 0.001, 0.003], [0.0005, 0.0005, 0.0016], [0.00016, 0.00016, 0.0006]],
+};
+function backdropRamp(sunEl, moonF, glow) {
+  const wd = smooth(3, 14, sunEl);
+  const up = smooth(-4, 1.5, sunEl);
+  const wg = up * (1 - wd);
+  const wt = smooth(-12, -5, sunEl) * (1 - up);
+  const wn = Math.max(0, 1 - wd - wg - wt);
+  // what the old, fixed exposure made of these numbers
+  const golden = smooth(-6, 2, sunEl) * (1 - smooth(4, 18, sunEl));
+  const shown = lerp(1, 4.2, 1 - smooth(-14, -3, sunEl)) * lerp(1, 1.2, golden);
+  const g = (x) => Math.pow(Math.max(x, 0), 1 / 2.2);
+  const out = new Float32Array(256 * 2 * 4);
+  for (let side = 0; side < 2; side++) {
+    const gold = side ? RAMPS.goldTo : RAMPS.goldAway, twi = side ? RAMPS.twiTo : RAMPS.twiAway;
+    // the stops for this sun, in display space
+    const stops = RAMP_Z.map((z, i) => [0, 1, 2].map((c) => {
+      const nite = RAMPS.night[i][c] * (1 + 1.1 * moonF) + [0.030, 0.017, 0.008][c] * glow * 0.32 * (1 - smooth(0, 4, z));
+      const day = RAMPS.day[i][c] * (side ? 1.04 : 0.97);
+      return g(day) * wd + g(gold[i][c]) * wg + g(twi[i][c]) * wt + g(nite) * wn;
+    }));
+    for (let c = 0; c < 3; c++) {
+      const y = stops.map((s) => s[c]);
+      const f = pchip(RAMP_Z, y);
+      for (let i = 0; i < 256; i++) {
+        const v = Math.pow(Math.max(f((i / 255) * 18), 0), 2.2);
+        out[(side * 256 + i) * 4 + c] = v * shown;
+      }
+    }
+    for (let i = 0; i < 256; i++) out[(side * 256 + i) * 4 + 3] = 1;
+  }
+  return out;
+}
+// a smooth curve through points that never overshoots them (Fritsch and Carlson)
+function pchip(x, y) {
+  const n = x.length, h = [], d = [], m = new Array(n);
+  for (let i = 0; i < n - 1; i++) { h[i] = x[i + 1] - x[i]; d[i] = (y[i + 1] - y[i]) / h[i]; }
+  m[0] = d[0]; m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    if (d[i - 1] * d[i] <= 0) m[i] = 0;
+    else { const w1 = 2 * h[i] + h[i - 1], w2 = h[i] + 2 * h[i - 1]; m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]); }
+  }
+  return (t) => {
+    let i = 0;
+    while (i < n - 2 && t > x[i + 1]) i++;
+    const s = clamp((t - x[i]) / h[i], 0, 1), s2 = s * s, s3 = s2 * s;
+    return (2 * s3 - 3 * s2 + 1) * y[i] + (s3 - 2 * s2 + s) * h[i] * m[i] + (-2 * s3 + 3 * s2) * y[i + 1] + (s3 - s2) * h[i] * m[i + 1];
+  };
 }
 
 export { inConus };

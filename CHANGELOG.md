@@ -1,5 +1,87 @@
 # Changelog
 
+## 1.3.0 — 2026-11-27
+
+### The Sky view, redrawn
+- **Clouds with form.** The renderer is new from the noise up. Cumulus are heaps with flat grey bases,
+  bright sunlit tops and a silver lining toward the sun; altocumulus and stratocumulus are sheets of
+  lens-shaped cells; cirrus is brushed out along the wind in feathered wisps you can see the blue
+  through; storms are dark underneath with white towers above. Fair-weather heaps share a base but each
+  grows to its own height.
+- **Light that is worked out, not suggested.** Optical depth toward the sun is swept through the weather
+  into a light volume, so every sample of cloud knows how much cloud the sunlight met on its way, how
+  deep it sits in its own cloud and what lies above and below it. A field of cumulus is treated as what
+  it is (cloud and gaps, the sun reaching the ground between them), a deck shades the deck beneath it by
+  what it lets through, and each sample marches a few steps toward the sun through the cloud's real
+  shape, which is what gives it lobes that shade one another. Near sunrise and sunset the light is
+  followed up from below as well: cloud bases catch fire after the ground has gone dark, the highest
+  clouds last.
+- **A physical sky.** Transmittance, multiple scattering and sky-view lookups of a real atmosphere
+  (Rayleigh, haze and ozone) replace the old approximation: deeper blue overhead, a pale horizon, long
+  twilights that go from gold through rose to indigo. The haze follows the humidity. Exposure is set
+  the way an eye sets it, from how bright the sky is, and opens up through dusk and under an overcast,
+  so twilight, a moonlit night and a starry one are each seen, each darker than the last.
+- **No banding.** The side view's backdrop is drawn from a smooth curve through its colours (the old one
+  had a flat spot at every stop, which showed as bands), colours are computed in half-float and the
+  final dither is blue noise. The tone curve keeps strong colour strong instead of washing a sunset
+  out to pale yellow.
+- **Movement.** Each band of cloud drifts as one body with its wind, so towers are no longer sheared
+  apart and the texture is never stretched; the shapes billow upward and their edges curl and evolve.
+  The model's weather stays where the model put it: clouds form on one side of a field and dissolve on
+  the other as they pass through.
+- **The timeline is smooth.** Between two model hours the view works out how far each band of cloud
+  really moved (the shift that best lines one hour's cover up with the next) and carries the clouds that
+  far while one hour's cover turns into the other's. They travel, grow and thin; nothing fades out and
+  back in, and a layer that exists in only one of the two hours keeps its own height while it goes.
+  While the timeline plays, each step takes the whole step, the sun and moon move with it, the next
+  hours are fetched ahead, and the play loop waits for the sky instead of running on without it.
+- **Another place, another sky.** Moving to a new point evaporates the old clouds at once and clears
+  their labels, winds, freezing level and storm cells; only "Condensing … clouds" shows until the new
+  sky is there, and then it condenses in from the densest parts outward in under a second (it used to
+  show the last place's cloud types until the new ones arrived, then swap).
+- **Night.** The Milky Way, in its real place for the time and latitude, with its bright core and dust
+  lanes; a moon with its seas; stars that twinkle near the horizon. The side view now has stars too
+  (its lens is too long to show them, so they are seen through a wide one looking up the same way).
+  Lightning bolts are thinner, with a violet glow.
+- **The five rough edges from 1.1.** Standing inside a storm no longer shows grey straight-edged
+  shapes (the weather is warped off the model's grid when it is baked, and beyond the model's box the
+  sky continues as fields of cloud instead of streaks); thin ice cloud is translucent, so a
+  cirrostratus halo stands against blue sky; the diagonal stripes while looking up into thick cloud
+  are gone (blue-noise sampling, and noise read no finer than the steps can follow); decks in the side
+  view have swelling tops, sagging bases and shaded cells instead of being flat bands, and the side
+  view's front is the cloud field's own ragged edge, not a slice; and the side view has its stars.
+- **Terrain and clouds together.** Cloud shadows on the land come from a shadow map at cloudlet scale
+  near the point and from the light volume beyond it, so a single cumulus darkens its own patch of
+  hillside and a deck dims the whole country under it; distant haze dims under cloud instead of
+  glowing through rain; light shafts are measured through the same shadows.
+
+### Faster
+- **Drawing.** Only a quarter of the cloud image's pixels are marched each frame; the image is rebuilt
+  from the frames before, following the camera and the wind. Long strides cross air with no weather in
+  it, far clouds are read from the noise's mips (and what the mips average away is put back as an exact
+  integral, so a distant field keeps its true opacity and its gaps), and the light is a lookup instead
+  of a march of its own. The weather volumes are redrawn only when the hour changes and the light
+  sweep is spread over a few frames. Whole frames in software rendering (SwiftShader, 1000×640):
+  fair-weather cumulus from the ground 2.4 s → 0.9 s, the side view 1.05 s → 0.4 s, cirrostratus over
+  altocumulus 3.6 s → 1.1 s, a stratus overcast 3.3 s → 0.8 s, a thunderstorm 3.6 s → 1.3 s, sunset
+  1.85 s → 1.0 s: between 1.8 and 4 times faster than 1.2.0, with far more in every frame.
+- **Opening.** The noise is generated a few slices a frame while the camera swoops in instead of in one
+  go, and hovering or pressing the Sky button starts fetching the sky before the view opens.
+- **"Condensing HRRR clouds…"** A sky frame used to download about 40 MB (some 220 whole-CONUS fields)
+  and decode them one at a time. Now: fields the picture never used are not fetched (18 MB of 2D fields
+  down to 8), temperature and wind come from one coarse copy per hour that every place shares, the
+  model's terrain is fetched once per region, and decoding runs in parallel where the installed ecCodes
+  is thread-safe (the PyPI wheels are; `MAMMATUS_PARALLEL_DECODE=0` turns it off). First frame at a new
+  place on a cold cache, 2 cores: 4.3 s (was 6 to 10); the next hour 2.7 s; another place in the same
+  region 0.2 s. The quick 2D "sketch" that was shown first is gone, and with it the swap from sketch
+  to real clouds.
+
+### Also
+- A saved view or link that names a product this server doesn't have no longer breaks the legend.
+- The UI fuzzer now plays and steps the timeline under the open Sky view, and feeds the sky-frame
+  decoder and the cloud-motion estimate junk; new tests cover the estimate, the frame loader, the coarse
+  whole-domain fields and the trimmed download list.
+
 ## 1.2.0 — 2026-11-27
 
 ### Real terrain in the Sky view

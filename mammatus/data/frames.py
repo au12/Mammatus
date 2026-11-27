@@ -39,7 +39,29 @@ log = logging.getLogger("mammatus.frames")
 
 MAGIC = b"MMF1"
 _ECCODES_LOCK = threading.Lock()
-_PARALLEL_DECODE = os.environ.get("MAMMATUS_PARALLEL_DECODE", "0") == "1"
+_PARALLEL_DECODE: bool | None = None
+
+
+def parallel_decode() -> bool:
+    """Whether GRIB messages may be decoded on several threads at once.
+
+    ecCodes is safe for that when it was built with ECCODES_THREADS (the PyPI wheels are): then a decode
+    pool really uses its cores instead of queueing behind one lock. MAMMATUS_PARALLEL_DECODE=0/1 overrides.
+    """
+    global _PARALLEL_DECODE
+    if _PARALLEL_DECODE is None:
+        env = os.environ.get("MAMMATUS_PARALLEL_DECODE")
+        if env in ("0", "1"):
+            _PARALLEL_DECODE = env == "1"
+        else:
+            try:
+                import eccodes
+
+                feats = eccodes.codes_get_features(eccodes.CODES_FEATURES_ENABLED)
+                _PARALLEL_DECODE = "ECCODES_THREADS" in str(feats).split()
+            except Exception:
+                _PARALLEL_DECODE = False
+    return _PARALLEL_DECODE
 
 
 # --------------------------------------------------------------------------- codec
@@ -555,7 +577,7 @@ class FrameService:
 
 
 def _decode_locked(blob: bytes) -> Decoded:
-    if _PARALLEL_DECODE:
+    if parallel_decode():
         return decode_message(blob)
     with _ECCODES_LOCK:
         return decode_message(blob)

@@ -46,7 +46,9 @@ family can use it from anywhere.
   the atmosphere above that place: a cut-away diorama from the ground to 52,000 ft, with real volumetric
   clouds of the right type, amount and height, built from the model's own cloud water and ice (HRRR,
   then RRFS, then GFS; Open-Meteo profiles marked *Estimated* only for ECMWF or outages). Clouds condense
-  in when it opens and drift with the model's winds at 4× real time; the timeline keeps working.
+  in when it opens, drift with the model's winds at 4× real time and billow as they go: bright where the
+  sun strikes them, grey underneath, silver-edged against the light, fire-coloured at sunset. Play the
+  timeline and the clouds travel across the sky from one model hour to the next while the sun moves on.
   The ground is the real ground: surveyed terrain for 250 km around the point, so the cut shows the true
   profile of the land, the ranges behind it stand in layers of haze, ridges poke through a low deck, and
   from the ground the skyline is the one outside your window.
@@ -85,11 +87,13 @@ family can use it from anywhere.
 | ![Regional view with point card](docs/screenshots/desktop-regional.jpg) | ![Skew-T sounding](docs/screenshots/desktop-sounding.jpg) |
 | HRRR simulated radar at county level, tap for details | Skew-T and indices (demo profile) |
 | ![Sky view: a thunderstorm in the afternoon](docs/screenshots/desktop-sky.jpg) | ![Sky view: the same storm at night, lit by lightning](docs/screenshots/desktop-sky-night.jpg) |
-| Sky view: a thunderstorm's dark base under its anvil, with mammatus (demo scene) | The same storm at night, lit from inside by a lightning flash |
+| Sky view: a thunderstorm to scale, from its rain to its anvil at 42,000 ft (demo scene) | The same storm at night, lit by a lightning stroke, over the glow of the city |
 | ![Sky view: fair-weather cumulus over the real Blue Ridge](docs/screenshots/desktop-sky-terrain.jpg) | ![Sky view: ridges standing out of a stratus deck](docs/screenshots/desktop-sky-islands.jpg) |
 | Sky view over Asheville with the real terrain: cloud layers to scale above the Blue Ridge | The same mountains under a low stratus deck, the high ridges standing out of it like islands |
 | ![Sky view from the ground in Zermatt](docs/screenshots/desktop-sky-ground.jpg) | ![Sky view pulled back over Denver](docs/screenshots/desktop-sky-above.jpg) |
-| Standing in Zermatt: the valley walls and the Matterhorn against a high overcast | Pulled back over Denver: the plains running into the Front Range |
+| Standing in Zermatt: the sun going down beside the Matterhorn under fair-weather cumulus | Pulled back over Denver: towering cumulus over the plains where they meet the Front Range |
+| ![Sky view at sunset from the ground](docs/screenshots/desktop-sky-sunset.jpg) | ![Sky view at dusk, side view](docs/screenshots/desktop-sky-dusk.jpg) |
+| Sunset from the ground: cumulus catching the last light under high cirrus | Dusk in the side view: three decks against the afterglow, the sun on its way down |
 
 <p align="center">
   <img src="docs/screenshots/mobile-map.jpg" width="19%" alt="Mobile map">
@@ -150,6 +154,7 @@ for an Nginx Proxy Manager walkthrough and the security model.
 | `MAMMATUS_MODELS` | `hrrr,rrfs,gfs,ecmwf,aifs` | Models to offer |
 | `MAMMATUS_CACHE_GB` | `10` | Frame cache size cap |
 | `MAMMATUS_SKY_CACHE_GB` | `2` | Sky view cache size cap (3D cloud boxes around viewed points) |
+| `MAMMATUS_PARALLEL_DECODE` | auto | Decode GRIB fields on several threads at once (`1`/`0`); by default on when the installed ecCodes says it is thread-safe |
 | `MAMMATUS_TERRAIN_URL` | Terrain Tiles on AWS | Elevation tiles for the Sky view's terrain: any Terrarium-encoded `{z}/{x}/{y}` tile server, or `off` |
 | `MAMMATUS_TERRAIN_TILE_SIZE` | `256` | Pixels per tile of that server (`256` or `512`) |
 | `MAMMATUS_TERRAIN_MAX_ZOOM` | `15` | Deepest zoom that server has |
@@ -177,8 +182,13 @@ for an Nginx Proxy Manager walkthrough and the security model.
 - **Sky view:** for a point, the server byte-ranges the model's hydrometeor mixing ratios (cloud water,
   ice, rain, snow, graupel) on pressure levels for a 120 km box, places them by hypsometric height, and
   packs a 40×40×64 voxel grid (3 km × 250 m) with coverage, convectiveness and layer base/top, plus a
-  cloud classification, storm cells and the nearest METAR. The browser ray-marches it through tileable
-  Perlin–Worley noise with multiple-scattering light, temporal accumulation and a physical sky.
+  cloud classification, storm cells and the nearest METAR. Temperature and wind come from one coarse copy
+  of the whole domain per hour, shared by every place. In the browser the two hours either side of the
+  shown time are blended (each band of cloud carried by how far it really moved between them) into
+  weather volumes; optical depth toward the sun is swept through those into a light volume; and a quarter
+  of the cloud image's pixels are ray-marched each frame through mipmapped Perlin–Worley noise, lit from
+  that volume, and rebuilt to full size from the frames before. The sky is a physical atmosphere
+  (transmittance, multiple-scattering and sky-view lookups after Hillaire).
 - **Terrain:** the first time a place is opened in the Sky view the server fetches about 75 open
   elevation tiles ([Terrain Tiles on AWS](https://registry.opendata.aws/terrain-tiles/): free, no key),
   and resamples them into three nested 1024² height grids around the point: ±16 km at 31 m, ±64 km at

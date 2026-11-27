@@ -29,7 +29,7 @@ export class PointCard {
       h("div", { class: "pc-actions" },
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "forecast" }) }, h("span", { html: icon("chart", 15) }), "Forecast"),
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "sounding" }) }, h("span", { html: icon("skewt", 15) }), "Sounding"),
-        h("button", { class: "btn sm sky", title: "The clouds above this point in 3D (S)", onclick: () => app.openSky(p) }, h("span", { html: icon("sky", 15) }), "Sky"),
+        h("button", { class: "btn sm sky", title: "The clouds above this point in 3D (S)", onclick: () => app.openSky(p), onpointerenter: () => app.sky?.prewarm(p), onpointerdown: () => app.sky?.prewarm(p) }, h("span", { html: icon("sky", 15) }), "Sky"),
         h("button", { class: "btn sm", onclick: () => app.selectPoint(p, { tab: "alerts" }) }, h("span", { html: icon("alert", 15) }), "Alerts")));
     document.getElementById("ui").append(this.el);
     document.body.classList.add("card-open");
