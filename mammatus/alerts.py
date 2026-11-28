@@ -88,6 +88,10 @@ def clean_rule_params(kind: str, params) -> dict:
         if not isinstance(model, str) or model not in REGISTRY:
             raise ValueError("Bad model")
         out["model"] = model
+        complete = p.get("complete", True)
+        if not isinstance(complete, bool):
+            raise ValueError("Bad notify option")
+        out["complete"] = complete   # False: as soon as the run's first hours are out
         cycles = p.get("cycles")
         if cycles is not None:
             if (not isinstance(cycles, list) or len(cycles) > 24
@@ -351,11 +355,14 @@ class RulesEngine:
 
     # -- model runs ----------------------------------------------------------
     async def on_run_update(self, model: str, info, new_steps: list[int]) -> None:
-        if not info.complete:
+        if not info.steps:
             return
         cyc = info.client()["cycle"]
         for r in self._rules("run"):
             if r["params"].get("model") != model:
+                continue
+            whole = r["params"].get("complete", True)
+            if whole and not info.complete:
                 continue
             if cyc not in (r["params"].get("cycles") or [0, 6, 12, 18]):
                 continue
@@ -365,8 +372,9 @@ class RulesEngine:
             self._save_state(r["id"], r["state"])
             try:
                 await self.notifier.notify(
-                    r["user_id"], "run", f"{model.upper()} {cyc:02d}z is in",
-                    f"All {len(info.steps)} forecast hours are available.",
+                    r["user_id"], "run", f"{model.upper()} {cyc:02d}z is {'in' if whole else 'arriving'}",
+                    f"All {len(info.steps)} forecast hours are available." if whole else
+                    f"The first {len(info.steps)} forecast hour{'s are' if len(info.steps) != 1 else ' is'} out; the rest follow over the next while.",
                     {"url": f"/#model={model}&run={info.run}"}, tag=f"run-{model}",
                 )
             except Exception:

@@ -113,3 +113,43 @@ def test_vapid_jwt(tmp_path):
     head, payload, sig = token.split(".")
     assert len(base64.urlsafe_b64decode(sig + "==")) == 64
     assert len(base64.urlsafe_b64decode(keys.public_b64 + "==")) == 65
+
+
+def test_run_rule_notify_option():
+    from mammatus import alerts
+
+    assert alerts.clean_rule_params("run", {"model": "gfs"})["complete"] is True
+    assert alerts.clean_rule_params("run", {"model": "gfs", "complete": False})["complete"] is False
+    import pytest
+
+    with pytest.raises(ValueError):
+        alerts.clean_rule_params("run", {"model": "gfs", "complete": "yes"})
+
+
+def test_run_rule_fires_on_first_hours_or_completion(monkeypatch):
+    import asyncio
+
+    from mammatus import alerts
+    from mammatus.data.runs import RunInfo
+
+    rules = [
+        {"id": 1, "user_id": 7, "params": {"model": "gfs", "complete": False, "cycles": None}, "state": {}},
+        {"id": 2, "user_id": 7, "params": {"model": "gfs", "complete": True, "cycles": None}, "state": {}},
+    ]
+    sent = []
+
+    class N:
+        async def notify(self, uid, kind, title, body, data=None, **kw):
+            sent.append((kw.get("tag"), title))
+
+    class R:
+        def on_update(self, fn):
+            pass
+
+    eng = alerts.RulesEngine(N(), None, None, R())
+    monkeypatch.setattr(alerts.RulesEngine, "_rules", staticmethod(lambda kind: rules))
+    monkeypatch.setattr(alerts.RulesEngine, "_save_state", staticmethod(lambda rid, st: None))
+    asyncio.run(eng.on_run_update("gfs", RunInfo("gfs", "2026112812", [0, 3, 6], False), [0, 3, 6]))
+    assert [t for t, _ in sent] == ["run-gfs"] and "arriving" in sent[0][1]
+    asyncio.run(eng.on_run_update("gfs", RunInfo("gfs", "2026112812", list(range(0, 385, 3)), True), [9]))
+    assert len(sent) == 2 and sent[1][1].endswith("is in")

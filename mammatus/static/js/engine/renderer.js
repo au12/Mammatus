@@ -5,6 +5,7 @@ import { Camera } from "./camera.js";
 import { Labels } from "./labels.js";
 import { FrontLayer } from "./fronts.js";
 import * as S from "./shaders.js";
+import { onBattery, onPowerChange } from "../power.js";
 
 const DEG = Math.PI / 180;
 const IS_MOBILE = matchMedia("(pointer: coarse)").matches || /Mobi|Android/i.test(navigator.userAgent);
@@ -53,9 +54,10 @@ export class Renderer extends EventTarget {
     this._lastFrame = 0;
     this._lastCam = -1;
     this.lastInteraction = performance.now();
-    this.idleParticleMs = this.lowPower ? 20000 : 120000;
-    // ambient animation (wind particles, lightning) runs at most this often; interaction never waits
-    this.ambientMs = this.lowPower ? 1000 / 30 : 1000 / 60;
+    // ambient animation (wind particles, lightning) runs at most this often and idles after a while
+    // without interaction; interaction never waits. Unplugged laptops get the phone budget.
+    this.applyPower();
+    onPowerChange(() => { this.applyPower(); this.requestRender(); });
     this.fieldAnim = null;
     this.frames = 0;
     this.stats = { frames: 0, skipped: 0, drawMs: 0, cached: 0 };
@@ -67,6 +69,12 @@ export class Renderer extends EventTarget {
     this._observe();
     this.labels = new Labels(this);
     this.frontLayer = new FrontLayer(this);
+  }
+
+  applyPower() {
+    const saving = this.lowPower || onBattery();
+    this.ambientMs = saving ? 1000 / 30 : 1000 / 60;
+    this.idleParticleMs = this.lowPower ? 20000 : onBattery() ? 45000 : 120000;
   }
 
   _init() {

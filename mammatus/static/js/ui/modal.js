@@ -14,7 +14,7 @@ export function openModal({ title, sections, initial, width, onClose }) {
   const show = async (id) => {
     const s = sections.find((x) => x.id === id) || sections[0];
     current = s.id;
-    if (nav) [...nav.children].forEach((b) => b.classList.toggle("sel", b.dataset.id === s.id));
+    if (nav) [...nav.children].forEach((b) => { const on = b.dataset.id === s.id; b.classList.toggle("sel", on); if (on) b.scrollIntoView?.({ block: "nearest", inline: "nearest" }); });
     pane.replaceChildren();
     pane.scrollTop = 0;
     try { await s.render(pane, { refresh: () => show(current), close }); } catch (err) { pane.append(h("div", { class: "warnbox" }, err.message || String(err))); }

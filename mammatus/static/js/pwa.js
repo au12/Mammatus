@@ -12,8 +12,13 @@ export async function register(onUpdate) {
       const w = reg.installing;
       w?.addEventListener("statechange", () => { if (w.state === "installed" && navigator.serviceWorker.controller) onUpdate?.(); });
     });
-    // check for updates when the app comes back to the foreground (cheap: one conditional request)
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) reg.update().catch(() => {}); });
+    // check for updates when the app comes back to the foreground: one conditional request, at most every half hour
+    let checked = Date.now();
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden || Date.now() - checked < 30 * 60000) return;
+      checked = Date.now();
+      reg.update().catch(() => {});
+    });
   } catch { reg = null; }
   return reg;
 }

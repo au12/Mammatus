@@ -36,7 +36,7 @@ export class Timeline {
       else if (e.key === "End") app.showIndex(this.steps.length - 1);
     });
     this.steps = [];
-    setInterval(() => this.placeNow(), 60000);
+    setInterval(() => { if (!document.hidden) this.placeNow(); }, 60000);
   }
 
   frameMs() { return this.speeds[this.speed][1]; }

@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.3.2 — 2026-11-28
+
+An audit for battery life, stability and polish.
+
+### Easier on batteries
+- **Unplugged laptops save power too.** Where the browser reports it (Chrome and Edge on laptops,
+  Android), running on battery holds ambient animation to 30 fps, stops the wind particles after 45 s
+  without a touch instead of two minutes, and lets lightning animation rest after 10 minutes. Plugged
+  back in, everything returns to full rate.
+- **The Sky view rests.** Left untouched (5 minutes on phones, 10 on an unplugged laptop, 30 otherwise;
+  never in ambient mode) the clouds settle into a finished still picture and the view stops drawing until
+  the next touch, key or change of hour. Its idle frame rate drops sooner, too. With reduced motion turned
+  on, the view used to keep asking for every display frame without drawing anything; it now draws its
+  still picture and stops.
+- **Nothing downloads in the background.** Hiding the app now cancels the frames queued ahead of the
+  timeline (a playing loop could keep fetching for a minute after the phone was locked), the alerts
+  overlay no longer wakes every 30 seconds while hidden, and glancing back at the app no longer costs a
+  round trip for model runs and a service-worker check each time (once a minute and once every half hour).
+- **The tap marker stops pulsing** after a few rings. The endless ring kept the browser compositing a
+  new frame 60 times a second for as long as a point was selected.
+- **Lighter glass in battery-saver mode.** The frosted panels are re-blurred on every frame the map moves
+  under them; a smaller blur over a denser tint looks nearly the same for a fraction of the GPU time.
+- **Half the code to start.** The Sky view (half of the app's JavaScript, its shaders alone a quarter) is
+  loaded the first time it is wanted: hovering or pressing Sky, the S key or a `#sky=` link. The app that
+  loads on every start went from 425 kB to 213 kB.
+
+### Fixes
+- Pressure centers showed their value off to one side and cut off ("99" for 995): the second line of the
+  label lost its centering.
+- The point card's Alerts button ran past the card's edge on desktop. The four actions are now icon over
+  label, as on phones, and always fit.
+- A "New run" alert set to *When the first hours arrive* was saved as *when complete*: the server dropped
+  the choice. It is kept now, and such a rule notifies as soon as a run's first hours are out.
+- Map credits no longer run under the timeline on wide screens (they wrap beside it) and are hidden behind
+  an open drawer.
+- On phones the layer pill shows the model and cycle without the date, instead of ending in "…"; the
+  settings tabs fade at the edge to show they scroll, and the chosen tab scrolls into view.
+- Settings → About lists the S key.
+
 ## 1.3.1 — 2026-11-27
 
 The four roughest things left in the new Sky view.

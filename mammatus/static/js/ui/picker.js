@@ -39,7 +39,8 @@ export class Picker {
       const cm = app.catalog.colormaps[p.cmap];
       sw.style.background = cm.mode === "category" ? `linear-gradient(135deg, ${cssGradient(cm).join(", ")})` : cssGradient(cm).replace("90deg", "135deg");
       b.textContent = p.name;
-      sub.innerHTML = `<span style="color:${m.color}">●</span> ${esc(m.short)} · ${esc(runLabel(s.run))}`;
+      const [cyc, ...day] = runLabel(s.run).split(" ");
+      sub.innerHTML = `<span style="color:${m.color}">●</span> ${esc(m.short)} · ${esc(cyc)}<span class="pd"> ${esc(day.join(" "))}</span>`;
     } else if (s.type === "radar") {
       sw.style.background = cssGradient(app.catalog.colormaps.mrms).replace("90deg", "135deg");
       b.textContent = "Radar";

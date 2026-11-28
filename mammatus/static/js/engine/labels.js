@@ -77,6 +77,7 @@ class Atlas {
     const ctx = this.sctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, spec.w, spec.h);
+    ctx.textAlign = "left";
     spec.draw(ctx);
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
@@ -173,6 +174,8 @@ const KINDS = {
   },
 };
 
+// (alignment is the caller's: a second call in the same sprite keeps it, where resetting it here used to
+// draw a pressure center's value left-aligned from the middle and clip it at the sprite's edge)
 function text(ctx, str, x, y, font, s, color, halo, haloColor) {
   ctx.font = font.replace(/(\d+(?:\.\d+)?)px/, (_, n) => `${(+n * s).toFixed(2)}px`);
   ctx.textBaseline = "middle";
@@ -182,7 +185,6 @@ function text(ctx, str, x, y, font, s, color, halo, haloColor) {
   ctx.strokeText(str, x, y);
   ctx.fillStyle = color;
   ctx.fillText(str, x, y);
-  ctx.textAlign = "left";
 }
 
 // ------------------------------------------------------------------ layer

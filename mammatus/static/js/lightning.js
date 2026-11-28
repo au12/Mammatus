@@ -10,6 +10,7 @@
 //  - stepping or playing radar and satellite frames flashes the strikes each step reveals.
 // Frames are only drawn while something is flashing, so an idle map costs nothing.
 import { get } from "./api.js";
+import { onBattery } from "./power.js";
 
 const CHUNK = 600;
 const STRIDE = 5;            // lon, lat, t, energy, rank
@@ -142,7 +143,7 @@ export class Lightning extends EventTarget {
   retain() { return this.mode === "step" || this.app.state?.source?.type !== "model" ? LOOP_RETAIN : LIVE_RETAIN; }
   animEnabled() {
     return this.app.prefs.lightningAnim !== false && !this.reduceMotion
-      && performance.now() - this.r.lastInteraction < this.idleLimit;
+      && performance.now() - this.r.lastInteraction < (onBattery() ? Math.min(this.idleLimit, 10 * 60000) : this.idleLimit);
   }
 
   // ------------------------------------------------------------------ public API

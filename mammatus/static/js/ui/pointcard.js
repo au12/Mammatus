@@ -38,6 +38,11 @@ export class PointCard {
     this.update();
     this.place();
     this.marker.style.display = "";
+    // pulse again for the new point (the ring stops after a few: see .marker .pulse)
+    const ring = this.marker.firstChild;
+    ring.style.animation = "none";
+    void ring.offsetWidth;
+    ring.style.animation = "";
     this.loadAlerts();
   }
 
@@ -88,7 +93,7 @@ export class PointCard {
     this.marker.style.display = vis ? "" : "none";
     if (vis) this.marker.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
     if (!this.el || this.app.mobile()) return;
-    this._size ||= { w: this.el.offsetWidth || 288, h: this.el.offsetHeight || 200 };
+    this._size ||= { w: this.el.offsetWidth || 300, h: this.el.offsetHeight || 200 };
     const { w, h: hh } = this._size;
     let cx = pr.x + 18, cy = pr.y - hh / 2;
     if (cx + w > innerWidth - 70) cx = pr.x - w - 18;

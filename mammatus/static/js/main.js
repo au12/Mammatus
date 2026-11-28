@@ -23,7 +23,7 @@ import { Lightning } from "./lightning.js";
 import { Fronts } from "./fronts.js";
 import * as pwa from "./pwa.js";
 import { sanitizePrefs } from "./prefs.js";
-import { SkyView } from "./sky/view.js";
+import { LazySky } from "./sky/lazy.js";
 
 const splashMsg = (t) => { const m = $("#splash .msg"); if (m) m.textContent = t; };
 const VIEW_KEY = "mm.view";
@@ -46,6 +46,7 @@ class App {
   async boot() {
     setUnits(this.prefs.units);
     const lowPower = this.prefs.lowPower ?? (isMobile() || isTouch());
+    document.body.classList.toggle("low-power", lowPower);
     const canvas = $("#globe");
     this.renderer = new Renderer(canvas, { lowPower });
     const r = this.renderer;
@@ -76,7 +77,7 @@ class App {
     this.lightning = new Lightning(this);
     this.fronts = new Fronts(this);
     this.buildUI();
-    this.sky = new SkyView(this);
+    this.sky = new LazySky(this);
     this.bindLayers();
     this.bindControls();
     this.bindKeys();
@@ -293,7 +294,7 @@ class App {
     this.selected = p;
     cam.flyTo({ lon: p.lon, lat: p.lat, zoom: Math.max(Math.min(cam.zoom, 8.2), 7.6) }, 650);
     this.renderer.poke();
-    this.sky.enter(p);
+    this.sky.enter(p)?.catch?.((err) => toastError(err, "Sky view isn't available"));
   }
 
   locate() {
@@ -643,10 +644,20 @@ class App {
       this.es.addEventListener("notification", (e) => this.onNotification(JSON.parse(e.data)));
     };
     const close = () => { this.es?.close(); this.es = null; };
+    let hiddenAt = 0;
     document.addEventListener("visibilitychange", async () => {
-      if (document.hidden) { close(); this.stopPlay(); return; }
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        close();
+        this.stopPlay();
+        // frames queued ahead of the timeline would otherwise keep downloading in the background
+        this.layers?.store.cancelPending((j) => j.priority >= 5);
+        return;
+      }
       open();
-      // catch up on anything missed while hidden
+      this.layers?.prefetch();
+      // catch up on anything missed while hidden (a glance at the phone needs no round trip)
+      if (Date.now() - hiddenAt < 60000) return;
       try { this.applyRuns(sortRuns((await API.get("/runs", { quiet: true })).runs)); } catch { /* offline */ }
     });
     open();

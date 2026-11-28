@@ -98,7 +98,7 @@ async function notifications(app, p, ctx) {
     if (r.kind === "nws") return [`NWS ${pp.types || "warnings"} at ${pointName(r.pointId)}`, `${pp.minSeverity || "Moderate"} or worse`];
     if (r.kind === "threshold") { const m = metrics[pp.metric]; return [`${m.label} ${pp.metric === "tmin" ? "≤" : "≥"} ${pp.value} ${m.unit} at ${pointName(r.pointId)}`, `Within ${pp.hours || 48} h, any of ${pp.models?.length || "the default"} models`]; }
     if (r.kind === "precip_soon") return [`Precipitation starting soon at ${pointName(r.pointId)}`, "About 1 hour ahead, from 15-minute forecasts"];
-    if (r.kind === "run") return [`New ${app.model(pp.model)?.short || pp.model} run`, pp.complete ? "When the run finishes" : "When the first hours arrive"];
+    if (r.kind === "run") return [`New ${app.model(pp.model)?.short || pp.model} run`, pp.complete === false ? "When the first hours arrive" : "When the run finishes"];
     return [r.kind, ""];
   };
   const renderRules = async () => {
@@ -140,7 +140,7 @@ async function notifications(app, p, ctx) {
       form.append(h("p", { class: "note", style: { margin: "0 0 10px" } }, "Get a heads-up when rain or snow is about to start, using 15-minute forecasts. Checks every 10 minutes."));
     } else if (kind === "run") {
       inputs.model = h("select", { class: "input" }, ...app.catalog.models.map((m) => h("option", { value: m.id }, m.name)));
-      inputs.complete = h("select", { class: "input" }, h("option", { value: "0" }, "When the first hours arrive"), h("option", { value: "1" }, "When the run is complete"));
+      inputs.complete = h("select", { class: "input" }, h("option", { value: "1" }, "When the run is complete"), h("option", { value: "0" }, "When the first hours arrive"));
       form.append(h("div", { class: "grid2" }, field("Model", inputs.model), field("Notify", inputs.complete)));
     }
     form.append(h("button", { class: "btn primary", onclick: async () => {
@@ -323,5 +323,5 @@ function about(app, p) {
   h("h4", {}, "Data"),
   h("p", { class: "note" }, "Model data: NOAA HRRR, RRFS and GFS via the NOAA Open Data Dissemination program; ECMWF IFS and AIFS open data (CC BY 4.0). Radar: NOAA MRMS. Lightning: NOAA GOES-R Geostationary Lightning Mapper. Fronts: NWS Weather Prediction Center. Satellite: courtesy of SSEC, University of Wisconsin–Madison (RealEarth). Alerts: National Weather Service. Point forecasts and soundings: Open-Meteo (CC BY 4.0). Basemap: Natural Earth and US Census via us-atlas. Earth imagery: NASA Blue Marble and Black Marble. Stars: Yale Bright Star Catalog."),
   h("h4", {}, "Keyboard"),
-  h("table", { class: "t" }, ...[["Space", "Play / pause"], ["← →", "Previous / next hour"], ["/", "Search"], ["L", "Layer picker"], ["G", "Globe / map"], ["F", "Forecast for the selected point"], ["Esc", "Close"]].map(([k, v]) => h("tr", {}, h("td", {}, h("span", { class: "kbd" }, k)), h("td", {}, v)))));
+  h("table", { class: "t" }, ...[["Space", "Play / pause"], ["← →", "Previous / next hour"], ["/", "Search"], ["L", "Layer picker"], ["G", "Globe / map (in the Sky view: from the ground)"], ["S", "Sky view"], ["F", "Forecast for the selected point"], ["Esc", "Close"]].map(([k, v]) => h("tr", {}, h("td", {}, h("span", { class: "kbd" }, k)), h("td", {}, v)))));
 }

@@ -72,7 +72,9 @@ family can use it from anywhere.
 - **Smooth and easy on batteries.** Labels and map symbols are drawn on the GPU, pixel-snapped and placed
   with hysteresis, so nothing flickers or jumps while you pan. Nothing renders unless something changes;
   the globe and data field are cached so lightning and wind frames redraw only what moves; animation
-  idles after 20 s on phones, caps at 30 fps in battery-saver mode and stops entirely in the background.
+  idles after 20 s on phones, caps at 30 fps in battery-saver mode or on an unplugged laptop, and stops
+  entirely in the background, where nothing is downloaded or polled either. The Sky view settles into a
+  still picture and stops drawing when left alone, and its code only loads when it is opened.
   Live updates disconnect when the app is hidden. Frames are compact (quantized, delta-coded, gzip) and
   cached immutably.
 
@@ -216,7 +218,8 @@ for an Nginx Proxy Manager walkthrough and the security model.
   projection with exact inverse per pixel, data textures sampled in-shader on the model's native grid
   (lat/lon or Lambert conformal), perceptual OKLab color ramps, GPU particle advection with transform
   feedback, instanced anti-aliased lines, GPU text from a sprite atlas, signed-distance-field symbols,
-  Web Workers for decoding and contouring. The whole app is about 155 kB gzipped.
+  Web Workers for decoding and contouring. The app is about 95 kB gzipped to start; the Sky view's
+  80 kB load the first time it is opened.
 
 ## Development
 

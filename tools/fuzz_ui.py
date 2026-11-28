@@ -382,7 +382,7 @@ class Fuzzer:
             }
             try { decodePatch(b.buffer); } catch (e) { /* rejected cleanly */ }
           }
-          if (app.sky) { app.sky.groundAt(junk(), junk()); }
+          app.sky?.groundAt?.(junk(), junk());
           // sky frames: junk bytes must be refused, and the motion estimate must survive empty frames
           const { decodeFrame, flow } = await import("/js/sky/data.js");
           for (let i = 0; i < 8; i++) {

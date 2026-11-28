@@ -13,6 +13,9 @@ export class AlertsLayer {
     this.timer = null;
     this.counties = null;
     this.lineIds = new Set();
+    this.fetchedAt = 0;
+    // nothing is polled in the background: coming back refreshes if the list has gone stale
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && this.enabled && Date.now() - this.fetchedAt > 110000) this.refresh(); });
   }
 
   async setEnabled(on) {
@@ -31,9 +34,10 @@ export class AlertsLayer {
   async refresh() {
     clearTimeout(this.timer);
     if (!this.enabled) return;
-    if (document.hidden) { this.timer = setTimeout(() => this.refresh(), 30000); return; }
+    if (document.hidden) return;
     try {
       const { alerts } = await get("/alerts", { quiet: true });
+      this.fetchedAt = Date.now();
       this.alerts = alerts;
       await this.draw();
     } catch { /* keep the last good set */ }

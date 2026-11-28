@@ -17,6 +17,7 @@ import { fetchTerrain, modelTerrain, EARTH_R } from "./terrain.js";
 import * as A from "./astro.js";
 import { Storm } from "./bolts.js";
 import { Ambience } from "./audio.js";
+import { onBattery } from "../power.js";
 
 const DEG = Math.PI / 180;
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -284,6 +285,7 @@ export class SkyView {
 
   onTime() {
     if (!this.isOpen || !this.p) return;
+    if (!this.amb) this.lastInteract = Math.max(this.lastInteract || 0, performance.now() - 60000 * 4);   // a new hour wakes a settled sky for a while
     const t = this.currentTime();
     const now = performance.now();
     // the sun and moon move to the new time along with the clouds (a jump of many hours just jumps)
@@ -795,7 +797,13 @@ export class SkyView {
   frame(now) {
     this.raf = 0;
     if (!this.isOpen || document.hidden) return;
-    const motion = !reducedMotion();
+    // the clouds drift and billow while someone is looking; left alone for long enough (ambient mode aside)
+    // the picture settles and the loop stops until the next touch, key or change of hour
+    const idleMin = (now - this.lastInteract) / 60000;
+    const idleStop = this.amb ? Infinity : this.r.lowPower ? 5 : onBattery() ? 10 : 30;
+    const motion = !reducedMotion() && idleMin < idleStop;
+    if (this._motion && !motion) this.settled = 0;      // (draw the still picture out before stopping)
+    this._motion = motion;
     const dt = this.lastNow ? Math.min(0.25, (now - this.lastNow) / 1000) : 0;
     let busy = !this.r.ready;
     if (this.intro) {
@@ -828,10 +836,11 @@ export class SkyView {
     this.pullRealLightning();
     const fl = this.storm.frame(now);
     if (fl.active) busy = true;
-    // ambient frame rate: slower on phones, slower still when nobody has touched it for a while
-    const idleMin = (now - this.lastInteract) / 60000;
-    const ambientFps = this.r.lowPower ? (idleMin > 3 ? 12 : 20) : (idleMin > 10 ? 20 : 30);
-    const due = busy || interacting || this.dirty || (motion && now - (this.lastDraw || 0) >= 1000 / ambientFps - 2);
+    // ambient frame rate: slower on phones and unplugged laptops, slower still when nobody has touched it for a while
+    const ambientFps = this.r.lowPower ? (idleMin > 2 ? 12 : 20) : onBattery() ? (idleMin > 2 ? 15 : 24) : (idleMin > 10 ? 20 : 30);
+    // a still picture is drawn out (the 2x2 cycle coming round) and then nothing: before, with motion off,
+    // the loop kept asking for every display frame without ever drawing or stopping
+    const due = busy || interacting || this.dirty || (motion ? now - (this.lastDraw || 0) >= 1000 / ambientFps - 2 : (this.settled || 0) <= 24);
     if (due) {
       this.dirty = false;
       try {
@@ -1434,6 +1443,7 @@ export class SkyView {
   key(e) {
     if (!this.isOpen) return false;
     const k = e.key;
+    this.lastInteract = performance.now();
     if (k === "Escape") {
       if (this.card) { this.card.remove(); this.card = null; }
       else if (this.menu?.classList.contains("open")) this.menu.classList.remove("open");
