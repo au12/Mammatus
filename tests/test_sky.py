@@ -267,6 +267,55 @@ def test_browser_follows_clouds_between_hours(tmp_path):
     assert sorted(out["fetched"]) == [1, 2, 3, 4, 5, 6, 7] and out["fetched"].index(7) == 4      # four under way, then the wanted one
 
 
+JS_OVERHEAD = r"""
+import fs from "node:fs";
+import { decodeFrame } from "%(module)s";
+const out = {};
+for (const [name, path] of Object.entries(%(paths)s)) {
+  const raw = fs.readFileSync(path);
+  const f = decodeFrame(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+  const base = [], strength = [];
+  for (let i = 0; i < f.anvil.length; i += 2) { base.push(f.anvil[i]); strength.push(f.anvil[i + 1]); }
+  out[name] = { overhead: f.overhead, mammatus: f.head.mammatus, baseMin: Math.min(...base), baseMax: Math.max(...base),
+                strong: strength.filter((x) => x > 0.02).length, cells: strength.length };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def test_browser_reads_the_light_under_cloud_and_the_anvil(tmp_path):
+    """sky/data.js under Node: how much daylight the cloud overhead lets down, and where an anvil's base is."""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    paths = {}
+    for scene in ("clear", "fair", "stratus", "front", "storm"):
+        paths[scene] = (tmp_path / f"{scene}.bin").as_posix()
+        Path(paths[scene]).write_bytes(gzip.decompress(sky.pack(sky.synth_box(scene), {})))
+    module = (Path(__file__).resolve().parents[1] / "mammatus/static/js/sky/data.js").as_posix()
+    script = tmp_path / "overhead.mjs"
+    script.write_text(JS_OVERHEAD % {"module": module, "paths": json.dumps(paths)})
+    run = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, run.stderr[-2000:]
+    out = json.loads(run.stdout)
+    # open sky, a broken field, a deck, a deep rain cloud: each lets less through than the last
+    assert out["clear"]["overhead"] == {"open": 1, "deck": 1}
+    assert 0.5 < out["fair"]["overhead"]["open"] < 1
+    assert out["stratus"]["overhead"]["open"] < 0.3 and 0.1 < out["stratus"]["overhead"]["deck"] < 0.6
+    assert out["front"]["overhead"]["open"] < 0.3 and out["front"]["overhead"]["deck"] < out["stratus"]["overhead"]["deck"] * 0.6
+    # a storm's anvil: pouches under part of the box only, but a base height everywhere (the texture filter
+    # must never blend it with "no anvil" at height zero)
+    st = out["storm"]
+    assert st["mammatus"] > 0 and 0 < st["strong"] < st["cells"]
+    assert st["baseMin"] > 5 / 16 and st["baseMax"] < 13 / 16
+    assert out["fair"]["baseMax"] == 0
+
+
 def test_sky_routes_need_login():
     from fastapi.testclient import TestClient
 

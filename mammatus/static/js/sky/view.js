@@ -27,7 +27,7 @@ const DRIFT = 4;           // clouds drift at 4x real time
 const WRAP = 25.6 * 4096;  // km: the drift offsets start over here (days away), on a multiple of the noise's tiles
 const RISE = 0.016, EVOLVE = 0.03, FALL = 0.13;      // km/s: billowing of the cloud shapes, of their fine detail, falling rain
 const EXPOSURE = 3.3;      // daylight exposure: a sunlit cloud top just reaches white
-const DAY_SKY = 0.0214;    // the sky's mean radiance (per unit of sunlight) under a high sun, which that exposure is for
+const DAY_SKY = 0.0214;    // the low sky's radiance (per unit of sunlight) under a high sun, which that exposure is for
 const DUSK_SKY = 0.0004;    // ... and with the sun 3 degrees down
 const MOONLIGHT = 0.004;   // the full moon against the sun (really 400 times less again: this is a night you can see)
 const hermite = (t) => t * t * (3 - 2 * t);
@@ -561,10 +561,19 @@ export class SkyView {
     const hEye = (this.camZ || 0) + elev;
     const sky = this.r.skyBrightness(mie, hEye < 0.25 ? 0.02 : Math.min(12, 2 ** Math.round(Math.log2(hEye))));
     const lum = sky(sun.el) + moonK * sky(moon.el) + 0.2126 * nightAir[0] + 0.7152 * nightAir[1] + 0.0722 * nightAir[2];
-    // (and under an overcast, from the ground, it opens further, as eyes do on a grey day)
-    const dull = lerp(1, Math.min(3, Math.pow(this.overcast(), -0.9)), this.grounded || 0);
     // (down to deep twilight it nearly keeps pace; below that it gives ground, and night is dark)
     const open = lum > DUSK_SKY ? Math.pow(DAY_SKY / lum, 0.85) : Math.pow(DAY_SKY / DUSK_SKY, 0.85) * Math.pow(DUSK_SKY / lum, 0.25);
+    // Under cloud, from the ground, there is no sky to go by: the eye adapts to the cloud base itself, which
+    // is what the cloud lets through of the sun and of the sky above it. A stratus deck then shows light
+    // grey, a deep rain cloud a darker one, the belly of a storm darker still, but none of them black.
+    const oc = this.overcast();
+    const lightLum = (0.2126 * lut[0] + 0.7152 * lut[1] + 0.0722 * lut[2]) * lightI;
+    const falling = lightLum * Math.max(Math.sin(lightEl * DEG), 0.03) + Math.PI * lum / 3.8;      // on the cloud tops (the dome is about a quarter as bright as the low sky that lum measures)
+    const deckLum = Math.max(falling * oc.deck / Math.PI, 1e-9);
+    const shown = clamp(0.24 * Math.pow(oc.deck / 0.3, 0.3), 0.07, 0.28);        // how bright that base should come out
+    let dull = clamp(Math.pow(shown / deckLum / (EXPOSURE * Math.pow(DAY_SKY / lum, 0.85)), (1 - oc.open) * (this.grounded || 0)), 1, 40);
+    // (by day and through dusk; a clouded night stays a dark one)
+    dull = Math.min(dull, lerp(3, 40, clamp(Math.log10(lum / DUSK_SKY), 0, 1)));
     const exposure = Math.min((this.tune?.exposure ?? EXPOSURE) * open * dull, 400);
     const snowing = this.cur?.head.precip?.kind === "snow";
     const snow = (sfc.t2m != null && sfc.t2m < 272.5 && (snowing || Math.abs(lat) > 40)) ? (snowing ? 0.75 : 0.35) : 0;
@@ -612,16 +621,16 @@ export class SkyView {
     return clamp(this._open * 1.15, 0, 1);
   }
 
-  // how much of the daylight the cloud overhead lets through to the ground (1 clear .. about 0.1 under a storm)
+  // the cloud over the point as the light meets it: how much of the sky there is open, and how much of the
+  // daylight the rest lets through (data.js works both out for each frame; eased, so they never jump)
   overcast() {
-    let t = 1;
-    for (const L of this.cur?.head.layers || []) {
-      const per = { Cu: 50, TCu: 60, Cb: 60, Ci: 0.5, Cs: 0.5, Cc: 0.5 }[L.genus] ?? 15;
-      const tau = per * Math.max(0.1, (L.top - L.base) / 1000), c = clamp(L.cover, 0, 1);
-      t *= 1 - c * c * (1 - 1 / (1 + 0.11 * tau));
-    }
-    this._dull = this._dull == null ? t : lerp(this._dull, t, 0.05);
-    return clamp(this._dull, 0.05, 1);
+    const D = this.vanish ? this.vanish.D : this.display;
+    const a = this.frames.get(D?.A)?.overhead, b = this.frames.get(D?.B)?.overhead || a;
+    const m = b && b !== a ? D.mix || 0 : 0;
+    const t = a ? { open: lerp(a.open, b.open, m), deck: lerp(a.deck, b.deck, m) } : { open: 1, deck: 1 };
+    const o = this._over ||= { ...t };
+    o.open = lerp(o.open, t.open, 0.05); o.deck = lerp(o.deck, t.deck, 0.05);
+    return { open: clamp(o.open, 0, 1), deck: clamp(o.deck, 0.004, 1) };
   }
 
   defaultHeading() {
@@ -904,6 +913,7 @@ export class SkyView {
   settle(n = 8) {
     for (let i = 0; i < n; i++) {
       const fl = this.storm.frame(performance.now());
+      this._driftAt = performance.now();      // (the same moment, drawn again: the clouds don't move on meanwhile)
       this.draw(performance.now(), { moving: false, dataChanged: false, flashes: fl.lights, bolts: fl.bolts });
     }
   }

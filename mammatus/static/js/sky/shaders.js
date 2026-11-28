@@ -351,6 +351,9 @@ vec2 gDir = vec2(1.0, 0.0);    // ... and that wind's direction (cirrus is combe
 float gFoot = 0.05;            // km across a pixel (or a voxel) at the sample
 float gFill = 0.0;             // set by cloudDensity: the share of that footprint with any cloud in it
 float gHeap = 0.0, gCir = 0.0, gCell = 0.0;     // ... and how much of a heap, how fibrous, how cellular the cloud there is
+float gThick = 1.0;            // ... and, in a sheet, how thick the cloud is just there against the sheet's average
+float gOver = 0.0;             // ... and how much of the same cloud stands right over the sample (km), where the light volume can't know
+float gGap = 0.0;              // where there is no cloud at the sample: how far off (km) the nearest can be
 
 float wcDecode(float c) { return c > 0.002 ? exp2(((c * 255.0 - 1.0) * (4.5 / 253.0) - 4.0) * 3.3219281) : 0.0; }
 
@@ -380,23 +383,51 @@ vec3 cellsOf(vec4 n) { return clamp((n.gba - vec3(0.21, 0.08, 0.13)) / vec3(0.53
 float cloudDensity(vec3 p, float cov, vec4 w1, vec4 w2, float fine, out float h) {
   h = 0.0;
   gFill = 0.0;
+  gThick = 1.0;
+  gOver = 0.0;
+  gGap = 0.0;
   if (cov < 0.01) return 0.0;
   float iceF = w2.g, cum = w2.b;
   float base = w1.b * ZTOP, top = max(w1.a * ZTOP, base + 0.12), thick = top - base;
   // what kind of cloud: fibrous ice, heaps, or a sheet (smooth, or broken into cells)
   float cir = smoothstep(0.4, 0.75, iceF) * (1.0 - smoothstep(0.3, 0.6, cum));
   float heap = smoothstep(0.52, 0.8, cum);
-  float cell = smoothstep(0.12, 0.5, cum) * (1.0 - heap);
+  // (cells are a thing of droplet cloud: where ice has taken over, a sheet is smooth or fibrous, and a storm's
+  // tower goes over into its anvil without a band of cells between them)
+  float cell = smoothstep(0.12, 0.5, cum) * (1.0 - heap) * (1.0 - smoothstep(0.3, 0.7, iceF));
   float deep = sat((thick - 1.0) / 3.0);
   float vary = heap * (1.0 - deep);
   gHeap = heap; gCir = cir; gCell = cell;
+  // Scud: under a deck that is raining, the wet air below the base condenses into ragged shreds that hang
+  // and race along beneath it, dark against the cloud above (each is lit only from underneath and the side).
+  float under = base - p.z;
+  if (under > 0.02 && under < 0.5 && heap < 0.9 && cir < 0.9 && cov > 0.5) {
+    float wet = smoothstep(0.03, 0.25, wcDecode(w1.g)) * (1.0 - heap) * (1.0 - cir) * smoothstep(0.5, 0.9, cov);
+    if (wet < 0.01) return 0.0;
+    vec3 qs = vec3(ROT_C * (p.xy - gDrift.xy), (p.z - 2.0 * u_rise) * 1.6);
+    // (torn, not cut: finer noise pushes the shreds' outlines about and frays them, or they would have the
+    // straight-sided cells of the noise they are made from)
+    vec4 Dw = textureLod(u_detail, vec3(qs.xy, qs.z - u_evo) / 0.8 + vec3(0.37, 0.61, 0.19), clamp(log2(gFoot * 64.0 / 0.8), 0.0, 6.0));
+    qs.xy += (vec2(Dw.b, Dw.g) - vec2(0.5, 0.45)) * 0.24;
+    float n = shapeOf(textureLod(u_noise, qs / 1.6 + vec3(0.23, 0.71, 0.55), lodOf(1.6)));
+    n = n * 0.7 + sat((Dw.b - 0.255) / 0.48) * 0.3 - (fine > 0.5 ? (1.0 - sat((Dw.r - 0.23) / 0.51)) * 0.2 : 0.1);
+    float hang = smoothstep(0.5, 0.32, under) * smoothstep(0.02, 0.1, under);
+    float u = (n * hang - (1.0 - 0.6 * wet)) * 5.0;
+    gFill = step(0.0, u);
+    gOver = 0.6 * under;
+    return sat(u) * 0.85;
+  }
   if (p.z < base - 0.12 || p.z > top + 0.2 + 0.3 * thick * vary) return 0.0;
   vec3 q = vec3(p.xy - gDrift.xy, p.z - u_rise);
+  // (In a sheet the large noise is read as columns, nearly the same all the way up: a deep rain cloud is then
+  // thick here and thin there right through, and lets more light down in one place than another. Read as it
+  // is in heaps, a few kilometres of depth would average it to an even grey.)
+  vec3 qa = vec3(q.xy, mix(0.2 * q.z + 3.1, q.z, heap));
   float lodA = lodOf(T_MACRO), lodB = lodOf(T_MESO);
   // (two readings of the large noise, at different sizes and angles: either alone would repeat every dozen
   // kilometres, which from above or toward the horizon shows as rows)
-  vec4 A = textureLod(u_noise, q / T_MACRO, lodA);
-  vec4 A2 = textureLod(u_noise, vec3(ROT_C * q.xy, q.z) / 19.7 + vec3(0.41, 0.77, 0.23), max(lodA - 0.6, 0.0));
+  vec4 A = textureLod(u_noise, qa / T_MACRO, lodA);
+  vec4 A2 = textureLod(u_noise, vec3(ROT_C * qa.xy, qa.z) / 19.7 + vec3(0.41, 0.77, 0.23), max(lodA - 0.6, 0.0));
   float sA = sat((shapeOf(A) * 0.55 + shapeOf(A2) * 0.45 - 0.55) * 1.35 + 0.55);
   vec3 cA = cellsOf(A);
   // Fair-weather heaps share a base (the condensation level) but not a top: each grows as far as its own
@@ -483,7 +514,11 @@ float cloudDensity(vec3 p, float cov, vec4 w1, vec4 w2, float fine, out float h)
   float thin = mix(mix(sqrt(covH), covH, cir), 1.0, heap);
   // ... and an overcast is not evenly thick: its cells and swells are denser, the seams between them thin,
   // which from underneath is the mottled grey of a real deck
-  thin *= mix(1.0, 0.4 + 1.0 * x, (1.0 - heap) * (1.0 - cir) * mix(0.6, 0.9, cell));
+  float uneven = (1.0 - heap) * (1.0 - cir);
+  gThick = mix(1.0, (0.3 + 1.4 * x), uneven * 0.9);
+  thin *= mix(1.0, 0.4 + 1.0 * x, uneven * mix(0.6, 0.9, cell));
+  // ... and over a few kilometres too: the lighter and darker reaches of a grey sky
+  thin *= mix(1.0, 0.45 + 1.1 * sA, uneven * 0.8);
 
   // fine erosion: wisps at the base, billows on top, fading out with distance on its own mips
   float er = 0.0;
@@ -496,6 +531,8 @@ float cloudDensity(vec3 p, float cov, vec4 w1, vec4 w2, float fine, out float h)
     float dr = sat((D.r - 0.23) / 0.51);
     float billow = mix(dr, 1.0 - dr, sat(h * 3.5));
     er = mix(mix(0.22, 0.30, cell), 0.42, heap) * mix(billow, sat((D.b - 0.255) / 0.48) * 0.9, cir) * mix(1.0, 0.6, cir);
+    // (the underside of a sheet is finer-grained than its cells: wisps and tatters a hundred metres across)
+    gThick *= mix(1.0, 0.7 + 0.6 * dr, uneven * 0.7);
   } else {
     er = mix(0.11, 0.2, heap) * mix(1.0, 0.6, cir);       // the erosion's average, so light and shade agree with the picture
   }
@@ -513,13 +550,16 @@ float cloudDensity(vec3 p, float cov, vec4 w1, vec4 w2, float fine, out float h)
   float ua = u0 - hw, ub = u0 + hw;
   float d = (rampInt(ub) - rampInt(ua)) / (ub - ua);
   gFill = (max(ub, 0.0) - max(ua, 0.0)) / (ub - ua);
+  // No cloud here: the shape would have to rise by this much for there to be, and the noise that makes it
+  // takes about 350 m to run through its range (cover and height change it too, more slowly).
+  if (ub < 0.0) gGap = min(-ub / gain / (cw * prof + 0.15) * 0.35, 0.4);
   return d * thin;
 }
 
 // pouches hanging under a storm's anvil
 float mammatusDensity(vec3 p) {
   if (u_mammatus < 0.01) return 0.0;
-  vec2 an = texture(u_anvil, p.xy / BOX + 0.5).rg;
+  vec2 an = texture(u_anvil, mirrorUV(p.xy / BOX + 0.5)).rg;
   float s = an.g * u_mammatus;
   if (s < 0.02) return 0.0;
   float base = an.r * ZTOP;
@@ -594,6 +634,28 @@ float wcDecode(float c) { return c > 0.002 ? exp2(((c * 255.0 - 1.0) * (4.5 / 25
 float wcEncode(float v) { return v >= 1e-4 ? (1.0 + 253.0 * clamp((log2(v) * 0.30103 + 4.0) / 4.5, 0.0, 1.0)) / 255.0 : 0.0; }
 vec3 uvwOf(vec3 p) { return vec3(p.xy / BOX + 0.5, p.z / ZTOP); }
 
+// What kind of cloud is here: x how cumuliform, y the share of its water that is ice. A deep cloud changes
+// kind with height (a storm's boiling tower, its glaciating crown, the anvil), and the model says where: at
+// one of its levels, the same right across the cloud, which drawn as it stands is a ruled line through the
+// storm. So in a deep cloud the kind is read through a kilometre of height about a level that wanders (wob,
+// km): turrets push up into the anvil, the change is gradual, and no level shows.
+vec2 kindAt(highp sampler3D aux, highp sampler3D vol, vec3 u, vec4 a0, vec4 v0, float wob) {
+  float liq = wcDecode(v0.r), ice = wcDecode(v0.g);
+  vec2 k0 = vec2(a0.g, ice / (ice + liq + 1e-5));
+  if (a0.r < 0.004 || (a0.a - a0.b) * ZTOP < 2.0) return k0;
+  vec2 k = vec2(0.0);
+  for (int i = 0; i < 2; i++) {
+    vec3 ut = vec3(u.xy, u.z + (wob + (i == 0 ? -0.55 : 0.55)) / ZTOP);
+    vec4 a = texture(aux, ut);
+    // (only the same cloud speaks: not the clear air past its top, nor another layer)
+    if (a.r < 0.004 || abs(a.b - a0.b) > 0.03) { k += k0; continue; }
+    vec4 v = texture(vol, ut);
+    float l = wcDecode(v.r), c = wcDecode(v.g);
+    k += vec2(a.g, c / (c + l + 1e-5));
+  }
+  return 0.5 * k;
+}
+
 void main() {
   vec2 xy = (gl_FragCoord.xy / u_n - 0.5) * BOX;
   vec3 p = vec3(xy, u_z);
@@ -611,8 +673,11 @@ void main() {
   vec3 q = p + warp;
   vec3 ua = uvwOf(q - vec3(u_adv.xy, 0.0));
   vec4 auxA = texture(u_aux0, ua), volA = texture(u_vol0, ua);
-  float cov = auxA.r, cum = auxA.g, base = auxA.b, top = auxA.a;
+  float cov = auxA.r, base = auxA.b, top = auxA.a;
   float liq = wcDecode(volA.r), ice = wcDecode(volA.g), rain = wcDecode(volA.b), snow = wcDecode(volA.a);
+  // (the level at which a deep cloud changes kind wanders by a kilometre or so, on the scale of its turrets)
+  float wob = (clamp((m2.a - 0.13) / 0.74, 0.0, 1.0) - 0.5) * 1.7 + (clamp((n.b - 0.08) / 0.79, 0.0, 1.0) - 0.5) * 0.7;
+  vec2 kind = kindAt(u_aux0, u_vol0, ua, auxA, volA, wob);
   if (u_mix > 0.001) {
     vec3 ub = uvwOf(q + vec3(u_adv.zw, 0.0));
     vec4 auxB = texture(u_aux1, ub), volB = texture(u_vol1, ub);
@@ -624,7 +689,7 @@ void main() {
     // where the two hours disagree, cloud lingers a little past the half-way point and arrives a little
     // before it, so the sky never thins out in the middle of a change
     cov = mix(auxA.r, auxB.r, mx) + 0.7 * mx * (1.0 - mx) * abs(auxA.r - auxB.r);
-    cum = auxA.g * wa + auxB.g * wb;
+    kind = kind * wa + kindAt(u_aux1, u_vol1, ub, auxB, volB, wob) * wb;
     base = auxA.b * wa + auxB.b * wb;
     top = auxA.a * wa + auxB.a * wb;
     liq = liq * wa + wcDecode(volB.r) * wb;
@@ -641,10 +706,48 @@ void main() {
     rain *= ap; snow *= ap;
   }
   float water = liq + 0.1733 * ice;
-  float iceF = sat((ice - liq * 0.6) / (ice + liq + 1e-5) * 1.6);
+  // (ice counts once it outweighs the droplets: 0 below a 3:8 share, 1 above about 3:4)
+  float iceF = sat(2.56 * kind.y - 0.96);
   float precip = rain + snow;
   o1 = vec4(sat(cov), wcEncode(precip), base, top);
-  o2 = vec4(wcEncode(water), iceF, cum, precip > 1e-5 ? snow / precip : 0.0);
+  o2 = vec4(wcEncode(water), iceF, kind.x, precip > 1e-5 ? snow / precip : 0.0);
+}`;
+
+// ------------------------------------------------------------------ where there is any weather at all
+//
+// Two coarse maps of the weather volumes (cells of 4 voxels a side, and of 16): the most cover or
+// precipitation anywhere in each cell. Read with linear filtering they say "nothing within half a cell of
+// here", which lets a ray cross the empty reaches of the box in a few long strides instead of feeling its
+// way: its steps are then spent on the clouds.
+export const OCC_FS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+precision highp sampler3D;
+#define ZTOP 16.0
+uniform highp sampler3D u_src;     // the weather volume (level 0) or the finer map (level 1)
+uniform sampler2D u_anvil;
+uniform float u_mammatus;
+uniform int u_level;
+uniform int u_layer;               // the layer of the map being drawn
+uniform vec3 u_size;               // the map's size, texels
+out vec4 o;
+void main() {
+  ivec3 c = ivec3(ivec2(gl_FragCoord.xy), u_layer) * 4;
+  ivec3 lim = textureSize(u_src, 0) - 1;
+  float m = 0.0;
+  for (int z = 0; z < 4; z++) for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+    vec4 v = texelFetch(u_src, min(c + ivec3(x, y, z), lim), 0);
+    m = max(m, u_level == 0 ? max(v.r, v.g) : v.r);
+  }
+  if (u_level == 0 && u_mammatus > 0.01) {
+    // (pouches hang in the clear air under an anvil, where the volumes hold nothing)
+    vec2 uv = gl_FragCoord.xy / u_size.xy, e = 0.5 / u_size.xy;
+    vec2 an = texture(u_anvil, uv).rg;
+    float g = max(max(an.g, texture(u_anvil, uv + e).g), max(texture(u_anvil, uv - e).g, max(texture(u_anvil, uv + vec2(e.x, -e.y)).g, texture(u_anvil, uv + vec2(-e.x, e.y)).g)));
+    float zlo = float(u_layer) * ZTOP / u_size.z, zhi = zlo + ZTOP / u_size.z;
+    if (g * u_mammatus > 0.015 && zhi > an.r * ZTOP - 1.8 && zlo < an.r * ZTOP + 0.3) m = 1.0;
+  }
+  o = vec4(m, 0.0, 0.0, 1.0);
 }`;
 
 // ------------------------------------------------------------------ light: optical depth swept through the weather
@@ -1172,7 +1275,9 @@ vec2 cloudLight(vec3 p) {
     vec2 e = abs(suv - 0.5) * 2.0;
     tau = mix(texture(u_shadow, suv).r, tauCoarse, smoothstep(0.75, 0.97, max(e.x, e.y)));
   }
-  return vec2(exp(-tau), 1.0 / (1.0 + 0.11 * tau));
+  // (what comes down diffusely crosses the cloud overhead, a far shorter way through a wide deck under a low
+  // sun than the beam's slanting one; through a broken sky the beam's gaps count)
+  return vec2(exp(-tau), 1.0 / (1.0 + 0.11 * min(tau, columnTau(p.xy))));
 }
 
 // aerial perspective: boundary-layer haze and air between the camera and something t away. The haze glows
@@ -1184,7 +1289,9 @@ vec3 hazed(vec3 col, vec3 ro, vec3 rd, float t) {
   if (u_cut.w > 0.5) { float den = dot(rd.xy, u_cut.xy); if (den > 1e-6) t0 = clamp((u_cut.z - dot(ro.xy, u_cut.xy)) / den, 0.0, t); }
   vec3 pa = ro + rd * mix(t0, t, 0.35), pb = ro + rd * t;
   float lit = 0.5 * (cloudLight(pa).y + cloudLight(pb).y);
-  return mix(col, skyColor(normalize(vec3(rd.xy, max(rd.z, 0.02)))) * mix(0.25, 1.0, lit), f);
+  vec3 air = skyColor(normalize(vec3(rd.xy, max(rd.z, 0.02))));
+  air = mix(vec3(dot(air, vec3(0.2126, 0.7152, 0.0722))), air, 0.3 + 0.7 * lit) * mix(0.25, 1.0, lit);
+  return mix(col, air, f);
 }
 
 // The Blue Marble's colour for a place. (Read at an explicit level: implicit derivatives are undefined
@@ -1252,6 +1359,24 @@ vec3 groundColor(vec3 ro, vec3 rd, float t) {
   return hazed(col, ro, rd, t);
 }
 
+// the sky in a direction: air, sun and moon, and at night the Milky Way and the unresolved starlight (the stars
+// themselves are drawn as points)
+vec3 skyAt(vec3 rd, vec2 ndc) {
+  vec3 col = skyColor(rd) + discs(rd);
+  if (u_starVis > 0.003) {
+    vec3 sd = u_stylize > 0.5 ? normalize(u_starCam * vec3(ndc * vec2(u_res.x / u_res.y, 1.0) * 0.55, 1.0)) : rd;
+    if (sd.z > -0.02) {
+      vec3 eq = u_eqInv * sd;
+      vec2 muv = vec2(atan(eq.y, eq.x) / (2.0 * PI), asin(clamp(eq.z, -1.0, 1.0)) / PI + 0.5);
+      muv.x = fract(muv.x);
+      float ext = exp(-0.25 / max(sd.z + 0.04, 0.03));
+      // (explicit level: the wrap of right ascension would otherwise pick the smallest mip along a seam)
+      col += textureLod(u_milky, muv, 0.0).rgb * u_milkyK * u_starVis * ext;
+    }
+  }
+  return col;
+}
+
 void main() {
   vec2 ndc = gl_FragCoord.xy / u_res * 2.0 - 1.0;
   vec3 rd = rayDir(ndc);
@@ -1289,21 +1414,19 @@ void main() {
     depth = tHit;
   } else {
     tHit = demTrace(ro, rd, max(tCut, 0.0), u_far, u_pix);
-    if (tHit > 0.0) { col = groundColor(ro, rd, tHit); depth = tHit; }
-    else {
-      col = skyColor(rd) + discs(rd);
-      // the Milky Way and the unresolved starlight of the night sky (the stars themselves are drawn as points)
-      if (u_starVis > 0.003) {
-        vec3 sd = u_stylize > 0.5 ? normalize(u_starCam * vec3(ndc * vec2(u_res.x / u_res.y, 1.0) * 0.55, 1.0)) : rd;
-        if (sd.z > -0.02) {
-          vec3 eq = u_eqInv * sd;
-          vec2 muv = vec2(atan(eq.y, eq.x) / (2.0 * PI), asin(clamp(eq.z, -1.0, 1.0)) / PI + 0.5);
-          muv.x = fract(muv.x);
-          float ext = exp(-0.25 / max(sd.z + 0.04, 0.03));
-          // (explicit level: the wrap of right ascension would otherwise pick the smallest mip along a seam)
-          col += textureLod(u_milky, muv, 0.0).rgb * u_milkyK * u_starVis * ext;
-        }
+    if (tHit > 0.0) {
+      col = groundColor(ro, rd, tHit); depth = tHit;
+      // The side view draws its air thin, so the scene on the table stays crisp; but seen from the diagram's
+      // height the country beyond would then run on to a hard, dark horizon half way up the picture. Far
+      // past the back of the table it goes over instead into the backdrop it meets there.
+      if (u_stylize > 0.0 && u_cut.w > 0.5) {
+        float den = dot(rd.xy, u_cut.xy);
+        float away = den > 1e-6 ? u_stylize * smoothstep(150.0, 500.0, tHit - (u_slab.x - dot(ro.xy, u_cut.xy)) / den) : 0.0;
+        if (away > 0.0) col = mix(col, skyAt(normalize(vec3(rd.xy, max(rd.z, 0.0))), ndc), away);
       }
+    }
+    else {
+      col = skyAt(rd, ndc);
       depth = u_far;
       // a skyline this ray cleared by less than a pixel covers part of the pixel: no stair-steps against the
       // sky. Its colour is the slope facing the camera, a texel and a half short of the crest.
@@ -1389,6 +1512,9 @@ ${CLOUD}
 ${LIGHTVOL}
 ${BLUE}
 uniform vec2 u_res;
+uniform highp sampler3D u_occ;   // the most weather anywhere in each cell of 4 voxels a side ...
+uniform highp sampler3D u_occ2;  // ... and of 16
+uniform vec4 u_occR;             // half a cell of each: across and up (km)
 uniform vec2 u_jitter;           // which of the 2x2 full-size pixels this frame's rays go through, and sub-pixel jitter
 uniform float u_pixAngle;        // radians per cloud pixel
 uniform sampler2D u_sceneDepth;
@@ -1455,33 +1581,53 @@ void main() {
   vec3 ground0 = u_groundAlb * (lightColor(0.0) * mu0 / PI + dome);
   int budget = u_maxSteps;
   float t0m = max(tNear, 0.0);          // steps grow with distance from where the march starts, not from the camera
+  // the stretch of the ray inside each band of cloud, and how far there is to march in all
+  float bA[6], bC[6];
+  float rest = 0.0;
+  for (int b = 0; b < 6; b++) {
+    bA[b] = 0.0; bC[b] = -1.0;
+    if (b >= u_nbands || tFar <= tNear) continue;
+    vec2 band = u_bands[b];
+    float a, c;
+    if (abs(rd.z) < 1e-5) { if (ro.z < band.x || ro.z > band.y) continue; a = tNear; c = tFar; }
+    else { float ta = (band.x - ro.z) / rd.z, tb = (band.y - ro.z) / rd.z; a = max(tNear, min(ta, tb)); c = min(tFar, max(ta, tb)); }
+    if (c <= a) continue;
+    bA[b] = a; bC[b] = c; rest += c - a;
+  }
+  int refs = 0;
   if (tFar > tNear) {
-    for (int b = 0; b < 6; b++) {
-      if (b >= u_nbands || budget <= 0 || T < 0.01) break;
-      vec2 band = u_bands[b];
-      float a, c;
-      if (abs(rd.z) < 1e-5) { if (ro.z < band.x || ro.z > band.y) continue; a = tNear; c = tFar; }
-      else { float ta = (band.x - ro.z) / rd.z, tb = (band.y - ro.z) / rd.z; a = max(tNear, min(ta, tb)); c = min(tFar, max(ta, tb)); }
+    for (int bi = 0; bi < 6; bi++) {
+      if (bi >= u_nbands || budget <= 0 || T < 0.01) break;
+      // (nearest band first: from above, that is the highest)
+      int b = rd.z < 0.0 ? u_nbands - 1 - bi : bi;
+      float a = bA[b], c = bC[b];
       if (c <= a) continue;
+      rest -= c - a;                      // (now: what lies beyond this band)
       gDrift = u_bDrift[b]; gDir = u_bDir[b];
-      // step length: 45 m plus 1.1 % of the distance from the start of the march; 2.6 times that through
-      // clear air, falling back half a stride when cloud is met so its edge is found with short steps
-      float t = a, empty = 0.0, cap = 1e3, skin = 0.0, rainy = 0.0;
-      bool first = true;
+      float t = a, empty = 0.0, cap = 1e3, skin = 0.0, rainy = 0.0, gap = 0.0;
+      // the last place known to be clear, and the nearer end of a stretch being searched for a cloud's edge
+      float lo = a, hi = -1.0;
+      int nref = 0;
       for (int i = 0; i < 160; i++) {
         if (budget <= 0 || T < 0.01 || t >= c) break;
         budget--;
-        // steps: 45 m plus 1.1 % of the distance marched, and never much finer than a pixel is wide there;
-        // through air with no weather in it, strides as long as the weather's own grain allows
+        // Steps: 45 m plus 1.1 % of the distance marched, and never much finer than a pixel is wide there.
+        // Through air with no weather in it, strides as long as the weather's own grain allows; through the
+        // clear air between clouds, as far as the nearest cloud can be; and inside cloudy air, until the ray
+        // is well into a cloud, short ones: the lit skin of a cloud is where its look is decided.
         float base = max(0.045 + 0.011 * (t - t0m), 1.2 * t * u_pixAngle);
         float stride = empty > 1.5 ? max(2.6, min(0.6, 0.2 / max(abs(rd.z), 0.05)) / base) : 1.0;
-        // (inside cloudy air, until the ray is well into a cloud, steps are short: the lit skin of a cloud is
-        // where its look is decided)
-        float dt = min(min(base * (skin > 0.0 ? mix(1.0, 0.45 + 0.55 * (1.0 - T), skin) : max(stride, 1.0 + rainy)), cap), c - t + 1e-4);
-        float ts = t + dt * jit;
+        float nat = min(max(base * (skin > 0.0 ? mix(1.0, 0.45 + 0.55 * (1.0 - T), skin) : max(stride, 1.0 + rainy)), gap), cap);
+        // A ray has only so many steps. One that is using them up (a long way through thin cloud, or through
+        // a field of cumulus without meeting one) lengthens its stride so that they last to the far end:
+        // what lies there is then drawn more softly, but it is drawn.
+        float starve = (1.0 - smoothstep(0.35, 0.7, float(budget) / float(u_maxSteps))) * (rest + c - t) / float(budget + 1);
+        float dt = min(max(nat, starve), c - t + 1e-4);
+        // (searching: the middle of the stretch between clear air and cloud)
+        float ts = hi > 0.0 ? 0.5 * (lo + hi) : t + dt * jit;
         vec3 p = ro + rd * ts;
         // (the noise is read no finer than the steps can follow: a sample stands for its whole step)
-        gFoot = max(max(ts * u_pixAngle, 0.35 * dt), 0.008);
+        gFoot = max(max(ts * u_pixAngle, 0.35 * (hi > 0.0 ? min(dt, hi - lo) : dt)), 0.008);
         vec3 uvw; float fade;
         vec4 w1 = weather1(p, uvw, fade);
         float precip = wcDecode(w1.g);
@@ -1496,35 +1642,71 @@ void main() {
           if (cutF < 0.01) { cov = 0.0; precip = 0.0; }
         }
         float dm = u_mammatus > 0.01 ? mammatusDensity(p) * cutF : 0.0;
-        if (cov < 0.01 && precip < 1e-4 && dm <= 0.0) { empty += 1.0; cap = 1e3; skin = 0.0; rainy = 0.0; t += dt; first = false; continue; }
-        // a thin layer is not stepped over: at least three samples through it (it would sparkle otherwise)
-        cap = cov >= 0.01 ? max(0.3 * (w1.a - w1.b) * ZTOP, 0.5 * base) : 1e3;
-        rainy = cov < 0.01 ? 1.0 : 0.0;          // (falling rain alone is smooth: twice the stride)
-        vec4 w2 = texture(u_w2, uvw);
-        float h;
-        float d = cloudDensity(p, cov, w1, w2, 1.0, h) * cutF;
-        skin = cov >= 0.01 ? gHeap : 0.0;
-        float water = wcDecode(w2.r);
-        float sc = cloudSigma(d, water) + dm * 16.0 * u_ext;
-        float sr = 0.0, ss = 0.0;
-        if (precip > 1e-4) {
-          // curtains with ragged edges: the model's amounts fade over a 3 km cell, noise in the (logarithmic)
-          // amount keeps a shaft from having straight walls
-          float rn = sat((textureLod(u_noise, vec3((p.xy - gDrift.xy) / 6.4, p.z / 12.8) + vec3(0.13, 0.57, 0.91), lodOf(6.4)).r - 0.54) / 0.35);
-          float pe = exp2(min((rn - 0.5) * 8.0, 0.7)) * cutF * fade;
-          if (w2.a < 0.92) sr = precip * (1.0 - w2.a) * pe * 0.9 * (0.25 + 1.5 * precipStreak(p, 0.0));
-          if (w2.a > 0.08) ss = precip * w2.a * pe * 9.0 * (0.3 + 1.1 * precipStreak(p, 1.0));
+        bool weather = !(cov < 0.01 && precip < 1e-4 && dm <= 0.0);
+        float se = 0.0, d = 0.0, sCloud = 0.0, sMam = 0.0, sc = 0.0, sr = 0.0, ss = 0.0, water = 0.0, h = 0.0;
+        float fillC = 0.0, thickV = 1.0, overV = 0.0;
+        vec4 w2 = vec4(0.0);
+        if (weather) {
+          w2 = texture(u_w2, uvw);
+          d = cloudDensity(p, cov, w1, w2, 1.0, h) * cutF;
+          // (how much of this sample's footprint has cloud in it at all: see the transmittance below)
+          fillC = clamp(gFill, 0.0, 1.0);
+          thickV = gThick; overV = gOver;
+          // (how far off the nearest cloud can be, when there is none here; a ray climbing or sinking through
+          // a layer meets its base or top sooner than that)
+          gap = d > 0.0 || cov < 0.01 ? 0.0 : min(gGap, 0.1 * (w1.a - w1.b) * ZTOP / max(abs(rd.z), 0.05));
+          water = wcDecode(w2.r);
+          sCloud = cloudSigma(d, water); sMam = dm * 16.0 * u_ext;
+          sc = sCloud + sMam;
+          if (precip > 1e-4) {
+            // curtains with ragged edges: the model's amounts fade over a 3 km cell, noise in the (logarithmic)
+            // amount keeps a shaft from having straight walls
+            float rn = sat((textureLod(u_noise, vec3((p.xy - gDrift.xy) / 6.4, p.z / 12.8) + vec3(0.13, 0.57, 0.91), lodOf(6.4)).r - 0.54) / 0.35);
+            float pe = exp2(min((rn - 0.5) * 8.0, 0.7)) * cutF * fade;
+            if (w2.a < 0.92) sr = precip * (1.0 - w2.a) * pe * 0.9 * (0.25 + 1.5 * precipStreak(p, 0.0));
+            if (w2.a > 0.08) ss = precip * w2.a * pe * 9.0 * (0.3 + 1.1 * precipStreak(p, 1.0));
+          }
+          se = sc + (sr + ss) * u_ext * 2.5;
         }
-        float se = sc + (sr + ss) * u_ext * 2.5;
-        if (se < 2e-3) { empty = 0.0; t += dt; first = false; continue; }      // (cloudy air, a gap in it: keep to short steps)
-        if (empty > 1.5 && !first) {
-          // strode into cloud: go back and take it in short steps
-          t = max(t, ts - base);
-          empty = 0.0;
+        bool hit = se >= 2e-3;
+        if (hi > 0.0) {
+          // searching for the edge: halve the stretch, three times; then march on from its clear end
+          if (hit) hi = ts; else lo = ts;
+          nref++;
+          if (nref >= 3) { t = lo; hi = -1.0; empty = 0.0; gap = 0.0; skin = cov >= 0.01 ? gHeap : skin; }
           continue;
         }
+        if (!hit) {
+          lo = ts;
+          if (!weather) {
+            cap = 1e3; skin = 0.0; rainy = 0.0; gap = 0.0;
+            // nothing here: nor, by the coarse maps, for half a cell around? Then stride straight across that
+            float safe = 0.0;
+            if (texture(u_occ2, uvw).r < 0.0079) safe = min(u_occR.z / max(length(rd.xy), 1e-3), u_occR.w / max(abs(rd.z), 1e-3));
+            else if (texture(u_occ, uvw).r < 0.0079) safe = min(u_occR.x / max(length(rd.xy), 1e-3), u_occR.y / max(abs(rd.z), 1e-3));
+            if (ts + safe > t + dt) { t = ts + safe; lo = t; empty = 0.0; continue; }
+            empty += 1.0;
+          }
+          else {
+            // (cloudy air, a gap in it)
+            empty = 0.0;
+            // a thin layer is not stepped over: at least three samples through it (it would sparkle otherwise)
+            cap = cov >= 0.01 ? max(0.3 * (w1.a - w1.b) * ZTOP, 0.5 * base) : 1e3;
+            rainy = cov < 0.01 ? 1.0 : 0.0;          // (falling rain alone is smooth: twice the stride)
+            skin = cov >= 0.01 ? gHeap : 0.0;
+          }
+          t += dt;
+          continue;
+        }
+        // Come upon cloud at the end of a long step: where in that step it began is anyone's guess, and a
+        // sample that lands deep inside shows none of the cloud's lit face. Go back and find its edge.
+        if (ts - lo > 1.8 * base && refs < 4 && sCloud > 0.0) { hi = ts; nref = 0; refs++; continue; }
         empty = 0.0;
-        first = false;
+        cap = cov >= 0.01 ? max(0.3 * (w1.a - w1.b) * ZTOP, 0.5 * base) : 1e3;
+        rainy = cov < 0.01 ? 1.0 : 0.0;
+        skin = cov >= 0.01 ? gHeap : 0.0;
+        gap = 0.0;
+        lo = ts + dt * (1.0 - jit);
 
         // ---- light
         // The cloud between here and the light, at its real shape: a few steps, each three times the last
@@ -1556,26 +1738,36 @@ void main() {
         // how much light has been scattered more than once here: none in a thin veil, all of it in a cumulus
         float thick = 1.0 - exp(-0.5 * (tauUp + tauDn + tauL));
         vec3 sunTerm = vec3(0.0);
+        // (a shred of scud stands in the light the deck above lets down: its own thickness over the sample,
+        // which the light volume is too coarse to hold, shades its underside)
+        float ownShade = overV > 0.0 ? 1.0 / (1.0 + 1.3 * GAM * sCloud / max(fillC, 0.2) * overV) : 1.0;
         for (int k = 0; k < 2; k++) {
           float wgt = k == 0 ? u_sunAbove : 1.0 - u_sunAbove;
           if (wgt < 0.004) continue;
           // what the beam has met on its way here, and how deep in its own cloud the sample is
           float beam = (k == 0 ? lv.x : lw.x) + tauL;
-          float depth = (k == 0 ? lv.z : lw.y) + tauL;
+          // (in a sheet, the cloud between here and the light is as much thicker or thinner than the light
+          // volume's even layer as the sheet is just here: dark under its cells, bright along the seams)
+          float depth = ((k == 0 ? lv.z : lw.y) + tauL) * thickV;
           // a light below the horizon enters through the cloud's base, so "beyond" is the cloud above
           float beyond = k == 0 ? tauDn : tauUp;
           float direct = exp(-beam);
           // two-stream: 1 where the light enters, 1 / (1 + GAM tau) on the far side of the whole cloud
           // (other clouds' shade falls on the whole of this one)
           float shade = 1.0 / (1.0 + GAM * (k == 0 ? lv.a : lw.z));      // (what a deck above lets through, diffused)
-          float diffuse = (1.0 + GAM * beyond) / (1.0 + GAM * (depth + beyond)) * shade;
-          float few = exp(-0.28 * depth) * shade;
           float slant = mix(0.42, 1.0, mu0);            // towers and flanks catch a low sun that flat tops don't
+          float diffuse = (1.0 + GAM * beyond) / (1.0 + GAM * (depth + beyond));
+          // Light also comes straight down from the cloud's top, which under a low sun is a far shorter way
+          // through a wide deck than back along the beam (but the top catches that sun at a glancing angle).
+          if (k == 0) diffuse = max(diffuse, max(mu0, 0.06) / slant * (1.0 + GAM * tauDn) / (1.0 + GAM * ((tauUp + tauL) * thickV + tauDn)));
+          diffuse *= shade * ownShade;
+          float few = exp(-0.28 * depth) * shade;
           sunTerm += wgt * (ph1 * direct + thick * (phM * 0.55 * few + slant * diffuse * mix(0.22, 0.30, few)));
         }
         // sky from above, the ground's light from below; each crosses the cloud between diffusely
-        float den = 1.0 + GAM * (tauUp + tauDn);
-        vec3 amb = (dome * (1.0 + GAM * tauDn) + ground0 / (1.0 + GAM * 0.6 * ctot) * (1.0 + GAM * tauUp)) / den;
+        float den = 1.0 + GAM * (tauUp * thickV + tauDn);
+        // (the ground under a whole deck gets only what the deck lets through; under a broken sky, sun between the clouds)
+        vec3 amb = (dome * (1.0 + GAM * tauDn) * ownShade + ground0 / (1.0 + GAM * mix(1.0, 0.6, u_fill) * ctot) * (1.0 + GAM * tauUp * thickV)) / den;
         // the horizon's glow on the flanks of anything thin enough to see sideways through
         amb += rim * 0.25 * (1.0 - thick);
         // The face of a cloud that we see is turned toward us, and so toward the sky behind us: its fill light.
@@ -1593,8 +1785,13 @@ void main() {
         vec3 inScatter = Fs * sunTerm + amb + u_flashCol * fl * 0.012;
         // droplets and crystals scatter nearly all the light that meets them; rain and snow a little less
         vec3 S = (sc * 0.999 + (sr * 0.62 + ss * 0.9) * u_ext * 2.5) * inScatter;
-        float Tr = exp(-se * dt);
-        Lsum += T * (S - S * Tr) / se;
+        // What gets through this step. A sample at a cloud's edge stands for a footprint that is part cloud,
+        // part clear air: light passes the clear part untouched and meets the cloud's own density in the rest.
+        // (Taken as an even haze of the mean density instead, any trace of a dense cloud is opaque, so an edge
+        // is drawn solid or not at all from one ray to the next: the sparkle around every cumulus.)
+        float Tc = fillC > 0.996 ? exp(-sCloud * dt) : (fillC > 0.004 ? 1.0 - fillC + fillC * exp(-sCloud / fillC * dt) : 1.0);
+        float Tr = Tc * exp(-(se - sCloud) * dt);
+        Lsum += T * (1.0 - Tr) * S / se;
         // what the halo and the rainbow need: thin, sunlit ice and rain on this ray
         float sunT = exp(-(mix(lw.x, lv.x, u_sunAbove) + tauL));
         halo += T * cloudSigma(d, water) * dt * smoothstep(0.55, 0.95, ice) * sunT;
@@ -1610,6 +1807,9 @@ void main() {
   // "infinitely far": scaled up next to real cloud, that would haze the cloud's edge to sky brightness and
   // draw a bright rim along every ridge standing in front of a storm.)
   float dc = wAcc > 1e-4 ? dAcc / wAcc : min(tScene, u_far);
+  // (the march stops at 1 % left: that last 1 % is taken as none, or the sun's disc, a hundred thousand
+  // times the sky, would still show as a point through a thundercloud)
+  T = clamp((T - 0.01) / 0.99, 0.0, 1.0);
   o = vec4(Lsum, T);
   oEx = vec4(dc, halo, bow, 1.0);
 }`;
@@ -1617,24 +1817,33 @@ void main() {
 // ------------------------------------------------------------------ temporal reconstruction
 //
 // The cloud pass fills one pixel of every 2x2 block each frame. Here the full-size image is rebuilt: a
-// pixel that was just marched takes (most of) its new value; the others are carried over from the last
-// frame, found where they were then (the camera may have moved, and the cloud has drifted with its wind),
-// and kept within what the new low-resolution picture allows so nothing can smear or ghost.
+// pixel that was just marched is averaged into what that pixel has gathered so far; the others are carried
+// over from the last frame, found where they were then (the camera may have moved, and the cloud has
+// drifted with its wind), and kept within what the new low-resolution picture allows so nothing can smear
+// or ghost.
+//
+// One ray through a cloud is a noisy measure of it (where along its step the sample fell decides how deep in
+// the cloud's lit skin it landed). So each pixel keeps count of the samples it stands for and takes the
+// true mean of them, up to a limit set by how fast the picture is changing: a still view goes on refining,
+// a moving one keeps to the last few and smooths each new sample with its neighbours instead (the noise is
+// blue: it is all between neighbouring pixels, and a little smoothing removes most of it).
 export const RESOLVE_FS = /* glsl */ `#version 300 es
 precision highp float;
 precision highp sampler2D;
 uniform sampler2D u_cur;       // this frame: half size in each direction
 uniform sampler2D u_curEx;
 uniform sampler2D u_hist;
-uniform sampler2D u_histEx;
+uniform sampler2D u_histEx;    // a: how many of its own samples a pixel's value stands for, / 32
 uniform mat4 u_invVP;
 uniform mat4 u_prevVP;
 uniform vec3 u_camPos;
 uniform vec2 u_res;            // full-size cloud image
 uniform vec2 u_jitter;         // this frame's pixel within each 2x2 block
-uniform float u_alpha;         // how much of a fresh sample to take
+uniform float u_alpha;         // the least a fresh sample counts for (its inverse: the most samples a pixel remembers)
 uniform float u_keep;          // how firmly to hold on to the other pixels' history
 uniform float u_clamp;         // how tightly history is held to what the new samples allow (1 while things move)
+uniform float u_soft;          // how far a fresh sample is evened out with its neighbours (while things move)
+uniform float u_unit;          // the radiance that shows as mid-grey at this exposure (tolerances are in these units)
 uniform float u_reset;
 uniform vec2 u_bands[6];
 uniform vec3 u_bVel[6];        // how far each layer moved since the last frame (km)
@@ -1651,7 +1860,8 @@ void main() {
   vec2 luv = (gl_FragCoord.xy - u_jitter - 0.5 + 1.0) / (u_res);
   vec4 c = fresh ? texelFetch(u_cur, min(lo, lim), 0) : texture(u_cur, luv);
   vec4 ce = fresh ? texelFetch(u_curEx, min(lo, lim), 0) : texture(u_curEx, luv);
-  if (u_reset > 0.5) { o = c; oEx = ce; return; }
+  float one = fresh ? 1.0 / 32.0 : 0.0;
+  if (u_reset > 0.5) { o = c; oEx = vec4(ce.rgb, one); return; }
   // where this bit of cloud was a frame ago
   vec2 ndc = uv * 2.0 - 1.0;
   vec4 a = u_invVP * vec4(ndc, -1.0, 1.0), b = u_invVP * vec4(ndc, 1.0, 1.0);
@@ -1661,24 +1871,40 @@ void main() {
   vec4 pc = u_prevVP * vec4(p, 1.0);
   vec2 puv = pc.xy / pc.w * 0.5 + 0.5;
   bool lost = any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0))) || pc.w <= 0.0;
-  if (lost) { o = c; oEx = ce; return; }
+  if (lost) { o = c; oEx = vec4(ce.rgb, one); return; }
   vec4 h = texture(u_hist, puv), he = texture(u_histEx, puv);
-  // the range the neighbourhood allows
-  vec4 mn = c, mx = c;
+  // the range the neighbourhood allows, and its mean
+  vec4 mn = c, mx = c, sum = vec4(0.0);
   for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
     vec4 s = texelFetch(u_cur, clamp(lo + ivec2(x, y), ivec2(0), lim), 0);
-    mn = min(mn, s); mx = max(mx, s);
+    mn = min(mn, s); mx = max(mx, s); sum += s;
   }
+  if (fresh && u_soft > 0.0) c = mix(c, sum / 9.0, u_soft);
   // (with nothing moving the history is right and is left alone: held to the coarse new picture it would
   // lose the detail it has gathered, in blocks)
-  vec4 ext = (mx - mn) * mix(3.0, 0.5, u_clamp) + vec4(mix(0.08, 0.012, u_clamp));
+  // (... nor the thin bright rim of a cloud against the sun, which most frames' rays pass either side of)
+  // (The slack is measured against the exposure: at night a fixed one would be a thousand times the whole
+  // picture, and yesterday afternoon's sunlit cloud, left in the history by a run through the timeline, would
+  // pass for tonight's.)
+  float slack = mix(0.08, 0.012, u_clamp);
+  vec4 ext = (mx - mn) * mix(3.0, 0.5, u_clamp) + vec4(vec3(slack * u_unit), slack) + max(mx, vec4(0.0)) * (0.6 * (1.0 - u_clamp));
   vec4 hc = clamp(h, mn - ext, mx + ext);
-  float alpha = fresh ? u_alpha : (1.0 - u_keep);
   // history that had to be pulled far back into range was wrong: trust the new picture more there
-  float off = length(h - hc) / (length(ext) + 1e-4);
-  alpha = max(alpha, clamp(off * 0.5, 0.0, 0.6));
+  float off = clamp(length(h - hc) / (length(ext) + 1e-4), 0.0, 1.0);
+  float n = he.a * 32.0 * (1.0 - off);
+  float alpha, n1;
+  if (fresh) {
+    // the mean of the samples so far ...
+    alpha = max(1.0 / (n + 1.0), u_alpha);
+    n1 = min(n + 1.0, 1.0 / u_alpha);
+  } else {
+    // ... and until a pixel has a sample of its own, its neighbours' speak for it
+    alpha = max(1.0 - u_keep, 0.5 * (1.0 - smoothstep(0.0, 1.0, n)));
+    n1 = min(n, 1.0 / u_alpha);
+  }
+  alpha = max(alpha, off * 0.6);
   o = mix(hc, c, alpha);
-  oEx = vec4(mix(he.r, ce.r, max(alpha, 0.3)), mix(he.gb, ce.gb, max(alpha, 0.12)), 1.0);
+  oEx = vec4(mix(he.r, ce.r, max(alpha, 0.3)), mix(he.gb, ce.gb, max(alpha, 0.12)), n1 / 32.0);
 }`;
 
 // ------------------------------------------------------------------ final image
@@ -1761,8 +1987,17 @@ void main() {
   float T = clamp(cl.a, 0.0, 1.0);
   vec3 dome = skyDome(), rim = skyRim();
   // distant cloud fades into the haze like the ground does
-  vec3 hazeCol = sceneT >= u_far * 0.99 ? bg : rim * 0.9 + lightColor(1.0) * 0.004;
+  // (against the sky it takes the sky's own colour there, so far cloud melts into it; but never the brilliance
+  // of the sun's or moon's disc or a star behind the cloud, which would shine through as if nothing were there)
+  vec3 hazeCol = sceneT >= u_far * 0.99 ? min(bg, rim * 2.0 + 1e-5) : rim * 0.9 + lightColor(1.0) * 0.004;
   float fh = 1.0 - exp(-hazeDepth(u_camPos, rd, min(ex.r, u_far)));
+  // (and the haze under cloud glows only with what the cloud lets down: dimmer than under open sky, and grey)
+  if (T < 0.998 && fh > 0.002) {
+    vec3 ph = u_camPos + rd * (0.5 * min(ex.r, 60.0));
+    vec3 lw; vec4 lvh = lightVol(vec3(ph.xy, clamp(ph.z, 0.05, 3.0)), lw);
+    float lit = 1.0 / (1.0 + 0.11 * mix(lw.x, lvh.x, u_sunAbove));
+    hazeCol = mix(vec3(dot(hazeCol, vec3(0.2126, 0.7152, 0.0722))), hazeCol, 0.3 + 0.7 * lit) * mix(0.25, 1.0, lit);
+  }
   vec3 col = bg * T + mix(max(cl.rgb, vec3(0.0)), hazeCol * (1.0 - T), fh);
 
   // light shafts through gaps in the cloud: the haze of the lowest few kilometres, sunlit or in shadow, along

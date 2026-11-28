@@ -90,8 +90,11 @@ function derive(head, vol, aux) {
       for (let q = kb - 1; q >= Math.max(0, kb - 6); q--) if (aux[at(q)] < 8) clear++;
       if (clear < 5 || kb * DZ < 5) continue;
       base[j * N + i] = kb * DZ;
-      strength[j * N + i] = Math.min(1, wc(vol[at(kb) + 1]) * 25 + 0.3);
+      // (pouches hang from a solid anvil, not from the thin veil it frays into)
+      const solid = Math.min(1, Math.max(0, (aux[at(kb)] / 255 - 0.35) / 0.5));
+      strength[j * N + i] = Math.min(1, wc(vol[at(kb) + 1]) * 25 + 0.3) * solid * solid * (3 - 2 * solid);
     }
+    let any = false;
     for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
       let s = 0, w = 0, b = 0, bw = 0;
       for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
@@ -101,6 +104,26 @@ function derive(head, vol, aux) {
       }
       anvil[(j * N + i) * 2] = bw ? b / bw / ZTOP : 0;
       anvil[(j * N + i) * 2 + 1] = (s / w) * (base[j * N + i] > 0 ? 1 : 0.6);
+      any ||= bw > 0;
+    }
+    // The base height is carried on past the anvil's outline, ring by ring. Left at zero there, the texture
+    // filter would slide it from the anvil's height to the ground across one cell, and hang a curtain of
+    // pouches down that slope all round the anvil (their strength alone says where the anvil ends).
+    for (let pass = 0; any && pass < 2 * N; pass++) {
+      let left = 0;
+      const prev = Float32Array.from(anvil);
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        if (prev[(j * N + i) * 2] > 0) continue;
+        let b = 0, bw = 0;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+          const jj = j + dj, ii = i + di;
+          if (jj < 0 || ii < 0 || jj >= N || ii >= N) continue;
+          const v = prev[(jj * N + ii) * 2];
+          if (v > 0) { b += v; bw++; }
+        }
+        if (bw) anvil[(j * N + i) * 2] = b / bw; else left++;
+      }
+      if (!left) break;
     }
   }
   // height bands holding anything to draw (the clouds are ray-marched only through these)
@@ -121,7 +144,36 @@ function derive(head, vol, aux) {
   // which levels hold anything, widened by the three levels the renderer's warp can reach
   const filled = new Uint8Array(NZ);
   for (const k of levels) for (let q = Math.max(0, k - 3); q <= Math.min(NZ - 1, k + 3); q++) filled[q] = 1;
-  return { head, vol, aux, terrain, wind, anvil, bands: mergeBands(bands), filled };
+  return { head, vol, aux, terrain, wind, anvil, bands: mergeBands(bands), filled, overhead: overhead(vol, aux) };
+}
+
+// How much daylight the cloud over the point lets down to the ground: what an eye standing there adapts to.
+// Worked out with the renderer's own optics down the columns within about 10 km of the point.
+//   open: the share of the sky there that is clear, deck: what the cloudy rest lets through, diffused.
+function overhead(vol, aux) {
+  const sm = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  const mixf = (a, b, t) => a + (b - a) * t;
+  let open = 0, deck = 0, w = 0, n = 0;
+  for (let j = N / 2 - 3; j < N / 2 + 3; j++) for (let i = N / 2 - 3; i < N / 2 + 3; i++) {
+    let tau = 0, cmax = 0;
+    for (let k = 0; k < NZ; k++) {
+      const o = ((k * N + j) * N + i) * 4;
+      const cov = aux[o] / 255;
+      if (cov < 0.06) continue;
+      const liq = wc(vol[o]), ice = wc(vol[o + 1]);
+      const iceF = Math.min(1, Math.max(0, 2.56 * ice / (ice + liq + 1e-5) - 0.96)), cum = aux[o + 1] / 255;
+      const heap = sm(0.52, 0.8, cum), cir = sm(0.4, 0.75, iceF) * (1 - sm(0.3, 0.6, cum));
+      const cell = sm(0.12, 0.5, cum) * (1 - heap) * (1 - sm(0.3, 0.7, iceF));
+      const floor = mixf(mixf(mixf(10, 22, cell), 0.3, cir), 50, heap);
+      // (a heap is about 0.6 of full density on average; a sheet thins with its cover)
+      const dens = mixf(mixf(Math.sqrt(cov), cov, cir) * 0.75, 0.6, heap);
+      tau += Math.max(150 * (liq + 0.1733 * ice), floor) * dens * DZ;
+      cmax = Math.max(cmax, cov);
+    }
+    const c = cmax * cmax;
+    open += 1 - c; deck += c / (1 + 0.11 * tau); w += c; n++;
+  }
+  return { open: open / n, deck: w > 1e-3 ? deck / w : 1 };
 }
 
 // How far (km east, north) the clouds of each height band moved between two frames of the same place: the

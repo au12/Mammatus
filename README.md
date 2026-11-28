@@ -94,6 +94,8 @@ family can use it from anywhere.
 | Standing in Zermatt: the sun going down beside the Matterhorn under fair-weather cumulus | Pulled back over Denver: towering cumulus over the plains where they meet the Front Range |
 | ![Sky view at sunset from the ground](docs/screenshots/desktop-sky-sunset.jpg) | ![Sky view at dusk, side view](docs/screenshots/desktop-sky-dusk.jpg) |
 | Sunset from the ground: cumulus catching the last light under high cirrus | Dusk in the side view: three decks against the afterglow, the sun on its way down |
+| ![Sky view under a stratus deck](docs/screenshots/desktop-sky-overcast.jpg) | ![Sky view looking up into a rain cloud](docs/screenshots/desktop-sky-rain.jpg) |
+| A grey afternoon over Puget Sound: a stratus deck, uneven and brighter where it thins, the low sun under its edge | Looking up into a deep rain cloud: darker under its thicker reaches, shreds of scud beneath the base |
 
 <p align="center">
   <img src="docs/screenshots/mobile-map.jpg" width="19%" alt="Mobile map">

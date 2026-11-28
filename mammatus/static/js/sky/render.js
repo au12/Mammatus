@@ -90,7 +90,7 @@ export class SkyRenderer {
     this.frameCap = lowPower ? 12 : 24;
     this.frameNo = 0;
     this.scale = lowPower ? 0.5 : 0.7;          // the cloud image against the screen (a quarter of it is marched each frame)
-    this.maxSteps = lowPower ? 52 : 84;
+    this.maxSteps = lowPower ? 60 : 96;
     this.volN = lowPower ? 96 : 160;            // weather and light volumes: voxels across the 120 km box
     this.shadowSize = lowPower ? 256 : 384;
     this.shadowSpan = 48;                        // km across: cloudlet-sized shadows near the point (the light volume serves beyond)
@@ -166,6 +166,18 @@ export class SkyRenderer {
     this.lv2 = null;                              // made the first time the light comes from below the horizon
     this._vol = vol;
     this.run = [0, 1, 2, 3].map(() => this._tex2D(n, n, gl.RGBA16F, gl.RGBA, gl.FLOAT, null));      // [3] ends up holding the whole column
+    // coarse maps of where there is any weather (cells of 4 voxels a side, and of 16): rays stride across the rest
+    const coarse = (w, d) => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_3D, t);
+      gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R8, w, w, d);
+      for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, p, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      return { tex: t, w, d };
+    };
+    this.occ = [coarse(n >> 2, NZ >> 2), coarse(n >> 4, NZ >> 4)];
+    this.occFB = gl.createFramebuffer();
     this.bakeFB = gl.createFramebuffer();
     this.lightFB = gl.createFramebuffer();
     this.wZero = new Uint8Array(NZ).fill(1);      // slices of the weather that hold nothing
@@ -501,6 +513,11 @@ export class SkyRenderer {
     this._bind(p, "u_noise", this.tex.noise, gl.TEXTURE_3D);
     this._bind(p, "u_detail", this.tex.detail, gl.TEXTURE_3D);
     this._bind(p, "u_anvil", (w.mix > 0.5 ? b : a).anvil);
+    if (u.u_occ) {
+      this._bind(p, "u_occ", this.occ[0].tex, gl.TEXTURE_3D);
+      this._bind(p, "u_occ2", this.occ[1].tex, gl.TEXTURE_3D);
+      gl.uniform4f(u.u_occR, 0.5 * BOX / this.occ[0].w, 0.5 * ZTOP / this.occ[0].d, 0.5 * BOX / this.occ[1].w, 0.5 * ZTOP / this.occ[1].d);
+    }
     if (u.u_rise) gl.uniform1f(u.u_rise, w.rise || 0);
     if (u.u_evo) gl.uniform1f(u.u_evo, w.evo || 0);
     if (u.u_fall) gl.uniform1f(u.u_fall, w.fall || 0);
@@ -581,9 +598,12 @@ export class SkyRenderer {
     this._draw(p);
   }
 
-  // How bright the sky is (the mean radiance of the dome, per unit of sunlight) for a sun at each of a set of
-  // elevations, in this haze and from this height: worked out once on the GPU and read back, so the view can
-  // set its exposure for any time of day without waiting on the picture. Returns a function of elevation (deg).
+  // How bright the sky is (per unit of sunlight) for a sun at each of a set of elevations, in this haze and
+  // from this height: worked out once on the GPU and read back, so the view can set its exposure for any time
+  // of day without waiting on the picture. Returns a function of elevation (deg).
+  // (What is measured is the low sky, the band the eye rests on, about four times as bright by day as the
+  // dome's mean; only the first entry, the depth of twilight, is the dome itself. The exposure constants in
+  // view.js were set against exactly this.)
   skyBrightness(mie, h0) {
     const key = `${mie.toFixed(2)}|${h0.toFixed(1)}`;
     this.skyTables ||= new Map();
@@ -703,7 +723,31 @@ export class SkyRenderer {
       gl.uniform4f(u.u_adv, d[0] * mix, d[1] * mix, d[0] * (1 - mix), d[1] * (1 - mix));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
+    this._occupancy(s, (mix > 0.5 ? b : a).anvil);
     return true;
+  }
+
+  // the coarse maps of where the weather volumes hold anything, redrawn with them
+  _occupancy(s, anvil) {
+    const gl = this.gl;
+    const p = this._use(this._prog("occ", this.shaders.QUAD_VS, this.shaders.OCC_FS));
+    const u = p.uniforms;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.occFB);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.uniform1f(u.u_mammatus, s.weather.mammatus || 0);
+    this._bind(p, "u_anvil", anvil);
+    this._quad(p);
+    this.occ.forEach((m, level) => {
+      gl.viewport(0, 0, m.w, m.w);
+      this._bind(p, "u_src", level ? this.occ[0].tex : this.w1, gl.TEXTURE_3D);
+      gl.uniform1i(u.u_level, level);
+      gl.uniform3f(u.u_size, m.w, m.w, m.d);
+      for (let z = 0; z < m.d; z++) {
+        gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, m.tex, 0, z);
+        gl.uniform1i(u.u_layer, z);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    });
   }
 
   // Optical depth toward the light and of the cloud overhead, swept through the weather slice by slice: down
@@ -915,7 +959,9 @@ export class SkyRenderer {
         gl.uniform2f(u.u_jitter, jit[0], jit[1]);
         gl.uniform1f(u.u_pixAngle, s.cam.fov / dst.h);
         this._bind(p, "u_sceneDepth", this.bg.tex[1]);
-        gl.uniform1i(u.u_maxSteps, Math.round(this.maxSteps * (s.cam.cut[3] > 0.5 ? 1 : 1.3)));   // from the ground rays cross the whole depth of the clouds
+        // (the most steps a ray may take: few need them all, now that empty air is crossed in strides. The side
+        // view's slab can be a hundred kilometres deep.)
+        gl.uniform1i(u.u_maxSteps, Math.round(this.maxSteps * (s.cam.cut[3] > 0.5 ? 1.25 : 1.15)));
         gl.uniform1i(u.u_lightSteps, this.lowPower ? 3 : 4);
         gl.uniform1f(u.u_fill, e.fill ?? 1);
         gl.uniform1f(u.u_far, s.cam.far);
@@ -944,9 +990,12 @@ export class SkyRenderer {
         gl.uniform2f(u.u_res, dst.w, dst.h);
         gl.uniform2f(u.u_jitter, jit[0], jit[1]);
         // moving: follow the new picture closely; still: let it settle, each new sample refining the last
-        gl.uniform1f(u.u_alpha, s.moving ? 0.85 : (s.dataChanged ? 0.6 : 0.15));
-        gl.uniform1f(u.u_keep, s.moving ? 0.8 : (s.dataChanged ? 0.9 : 0.97));
+        // moving: the last few samples, each smoothed; still: the mean of many, refining as it goes
+        gl.uniform1f(u.u_alpha, s.moving ? 0.3 : (s.dataChanged ? 0.2 : 0.1));
+        gl.uniform1f(u.u_keep, s.moving ? 0.85 : (s.dataChanged ? 0.92 : 0.97));
         gl.uniform1f(u.u_clamp, s.moving || s.dataChanged ? 1 : 0.1);
+        gl.uniform1f(u.u_soft, s.moving ? 0.5 : (s.dataChanged ? 0.3 : 0));
+        gl.uniform1f(u.u_unit, 3.3 / Math.max(e.exposure, 1e-3));
         gl.uniform1f(u.u_reset, this.reset ? 1 : 0);
         this._bandUniforms(p, s);
         const vel = new Float32Array(18);

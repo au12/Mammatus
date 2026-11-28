@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.3.1 — 2026-11-27
+
+The four roughest things left in the new Sky view.
+
+### Grain at cloud edges
+- **Edges are covered, not dotted.** A ray's sample at the edge of a cloud stands for a footprint that is
+  part cloud and part clear air. It was treated as an even haze, and since any trace of a dense cloud is
+  opaque, an edge came out solid or missing from one ray to the next: the sparkle around every cumulus,
+  the dotted veil where a field thins out. Light now passes the clear part of the footprint and meets
+  the cloud's own density in the rest, so an edge is as opaque as it is covered.
+- **Each pixel keeps count.** The picture is still built from a quarter of its pixels a frame, but every
+  pixel now takes the true mean of the samples it has gathered (up to ten when nothing is moving, the
+  last few while it is) instead of always leaning a fixed share toward the newest. While you drag or
+  the timeline plays, each new sample is also evened out with its neighbours: the noise is blue, all of
+  it between neighbouring pixels, so a little smoothing takes most of it out. A moving view is now soft
+  and clean where it was sharp and gritty, and sharpens when it stops.
+- **Rays spend their steps on cloud.** Two coarse maps of where the weather volumes hold anything let a
+  ray cross empty air in a few long strides; between the clouds of a broken field it steps as far as the
+  nearest cloud can be; and when a long step lands in cloud it goes back and finds the cloud's edge, so
+  the first sample is on the lit skin, not somewhere inside. A ray that is still running out lengthens
+  its stride to reach the far end. In the pulled-back side view this is the difference between a whole
+  storm and half of one: rays used to give up 6 km into a 90 km slab, leaving holes and ragged bites
+  out of whatever stood behind a field of cumulus.
+- History is now judged against the exposure. A run through the timeline from afternoon into night used
+  to leave sunlit cloud in the picture as white blocks, because the tolerance was a fixed brightness a
+  thousand times the night's.
+- The sun's disc no longer shows as a white dot through solid overcast (the haze in front of a cloud
+  took the colour of whatever was behind it, the sun included).
+
+### The storm's seam
+- A storm changes from boiling tower to smooth anvil where the model's layers say it does: at one level,
+  the same right across the cloud, which drew a ruled line through it. In a deep cloud the kind of cloud
+  is now read through a kilometre of height about a level that wanders with the cloud's turrets, and a
+  cloud that is going over to ice passes through "smooth", not through "cellular", on the way. Real model
+  storms had the same line, at the height where the air reaches -30 C.
+
+### The dashed lines beside the storm
+- They were mammatus. The height of an anvil's base was stored only under the anvil, zero elsewhere, and
+  the texture filter slid it from 9 km to the ground across the one cell at the anvil's edge, hanging a
+  curtain of pouches down that slope all round it: seen edge-on, dotted lines. The base height is now
+  carried on past the outline, and pouches hang only from solid anvil, not from the veil it frays into.
+- Far beyond the back of the side view's slab, the ground now goes off into the backdrop instead of
+  ending in a hard dark horizon half way up the picture (most visible at night).
+
+### Overcast from the ground
+- **You can see it.** Under cloud there is no sky to set the exposure by, and the view was setting it by
+  the sky anyway: a rain deck came out near-black. The eye now adapts to the cloud base itself, worked
+  out from the cloud over the point with the renderer's own optics: stratus shows light grey, a deep
+  rain cloud a darker one, the belly of a storm darker still, and the ground under them is lit.
+- **It has a surface.** A sheet is thicker here and thinner there, and what gets through follows:
+  dark under its cells, bright along the seams, with lighter and darker reaches a few kilometres
+  across (the large-scale unevenness now runs right up through a deep cloud instead of averaging out).
+- **Scud.** Under a deck that is raining, ragged shreds of cloud hang and drift below the base, darker
+  than the cloud above them.
+- Light reaches a wide deck from its top as well as back along the sun's beam, so decks under a low
+  sun are no longer several times too dark, and the ground under them gets what the deck lets through.
+  The haze under cloud is lit by the cloud, grey, not by the open sky's blue.
+- The 22-degree halo in cirrostratus is far easier to see for the same reason.
+
+### Also
+- Seen from above, the nearest band of cloud is drawn first (cirrus used to hide behind the cumulus
+  under it).
+- The step budget is a little larger (96 from 84; 60 from 52 on phones): few rays need it all now.
+
 ## 1.3.0 — 2026-11-27
 
 ### The Sky view, redrawn
