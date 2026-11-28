@@ -325,3 +325,17 @@ def test_sky_routes_need_login():
         assert c.get("/api/sky/frame/hrrr/2026112700/3?lat=35&lon=-82").status_code == 401
         assert c.get("/api/sky/estimated?lat=35&lon=-82&t=1").status_code == 401
         assert c.get("/api/sky/observed?lat=35&lon=-82").status_code == 401
+
+
+def test_every_release_has_notes():
+    """The release workflow publishes the CHANGELOG section of the version in mammatus/__init__.py."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    tool = Path(__file__).resolve().parents[1] / "tools/release_notes.py"
+    v = subprocess.run([sys.executable, str(tool), "--version"], capture_output=True, text=True, check=True).stdout.strip()
+    out = subprocess.run([sys.executable, str(tool), v], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() and not out.stdout.lstrip().startswith("## ")
+    assert f"## {v}" not in out.stdout and "\n## " not in out.stdout

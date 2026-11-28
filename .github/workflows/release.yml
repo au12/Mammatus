@@ -1,0 +1,77 @@
+name: Release
+
+# A release is cut by bumping __version__ in mammatus/__init__.py (with its CHANGELOG.md section) and
+# pushing to main. On every push to main this checks whether that version is tagged yet; if not, it tags
+# the commit vX.Y.Z, publishes the GitHub release with the changelog section as its notes, and starts the
+# image build for the tag (so GHCR gets X.Y.Z and X.Y images alongside latest). Pushes that don't bump the
+# version find the tag already there and do nothing.
+#
+# Run it by hand with a version to release an older one from the commit that introduced it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (blank: the one in mammatus/__init__.py)"
+        required: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Version
+        id: v
+        env:
+          WANT: ${{ inputs.version }}
+        run: |
+          cur=$(python tools/release_notes.py --version)
+          v=${WANT:-$cur}; v=${v#v}
+          if [ "$v" = "$cur" ]; then
+            sha=$GITHUB_SHA
+          else
+            # the commit that set __version__ to this version
+            sha=$(git log --format=%H --reverse -S"__version__ = \"$v\"" -- mammatus/__init__.py | head -1)
+            [ -n "$sha" ] || { echo "no commit set __version__ to $v"; exit 1; }
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v$v is already tagged"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          # (only the newest version is marked as the latest release)
+          newest=$(printf '%s\n%s\n' "$v" "$(git tag -l 'v*' | sed 's/^v//')" | sort -V | tail -1)
+          echo "latest=$([ "$newest" = "$v" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Tag and publish the release
+        if: steps.v.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.v.outputs.version }}
+          SHA: ${{ steps.v.outputs.sha }}
+          LATEST: ${{ steps.v.outputs.latest }}
+        run: |
+          git checkout -q "$SHA" -- CHANGELOG.md
+          python tools/release_notes.py "$V" > notes.md
+          gh release create "v$V" --target "$SHA" --title "v$V" --notes-file notes.md --latest="$LATEST"
+      - name: Build the image for the tag
+        # (a tag made with GITHUB_TOKEN doesn't start other workflows on its own; a dispatch does)
+        if: steps.v.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.v.outputs.version }}
+        run: gh workflow run docker.yml --ref "v$V"

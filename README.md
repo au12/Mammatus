@@ -241,6 +241,12 @@ Basemap, star and texture assets are prebuilt in `mammatus/static/data` and `mam
 (`tools/fetch_sources.sh`, `tools/build_assets.mjs`, `tools/build_textures.py` regenerate them);
 `tools/build_icons.mjs` renders the icon set from the logo source.
 
+Releasing: bump `__version__` in `mammatus/__init__.py`, add its `## X.Y.Z` section to `CHANGELOG.md`
+and push to `main`. The Release workflow tags the commit `vX.Y.Z`, publishes the GitHub release with
+that changelog section as its notes, and builds the `X.Y.Z` and `X.Y` images on GHCR (`latest` follows
+`main` as before). A version without a changelog section fails the tests. To release an older version
+from the commit that introduced it, run the workflow by hand with that version.
+
 ## Credits
 
 Model data: NOAA (HRRR, RRFS, GFS via the NOAA Open Data Dissemination program) and ECMWF open data
