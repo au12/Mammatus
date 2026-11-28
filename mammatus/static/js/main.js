@@ -621,7 +621,7 @@ class App {
     try {
       const { times } = await API.get("/sat/globalir/times?count=1", { quiet: true });
       const stamp = times[times.length - 1];
-      const img = await loadImage(`/api/sat/globalir/${stamp}.webp`);
+      const img = await loadImage(`/api/sat/globalir/${stamp}.webp?v=2`);
       this._clouds = { img, at: now };
       if (this.state.source?.type !== "sat" && this.prefs.liveClouds !== false) { this.renderer.setClouds(img); this.renderer.look.clouds = 0.85; this.renderer.requestRender(); }
     } catch { /* clouds are decoration */ }

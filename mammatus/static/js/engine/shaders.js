@@ -263,6 +263,17 @@ uniform vec3 u_water;      // stylized water color
 
 vec3 toLinear(vec3 c) { return c * c; }
 
+#if !defined(MESH) && !defined(FLAT)
+// Longitude east of the view centre under a screen pixel; rays past the limb graze it.
+float relLon(vec2 px) {
+  vec3 o = vec3(0.0, 0.0, u_vp.w);
+  vec3 d = normalize(vec3(px, -u_vp.z));
+  float b = dot(o, d);
+  vec3 h = o + (-b - sqrt(max(b * b - u_vp.w * u_vp.w + 1.0, 0.0))) * d;
+  return atan(h.x, -h.y * sin(u_view.y) + h.z * cos(u_view.y));
+}
+#endif
+
 void main() {
   vec2 ll;
   vec3 nrmCam = vec3(0.0, 0.0, 1.0);
@@ -300,10 +311,26 @@ void main() {
 #endif
   float lon = ll.x, lat = ll.y;
   vec3 nE = vec3(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat));
-  vec2 uv = vec2(fract(lon / TAU + 0.5), 0.5 - lat / PI);
-  vec3 day = toLinear(texture(u_day, uv).rgb);
-  float lights = texture(u_night, uv).r;
-  vec3 ter = texture(u_terrain, uv).rgb;
+  // Equirectangular lookups. Longitude has to wrap somewhere, and wherever it jumps inside a
+  // 2x2 pixel quad the GPU reads the jump as a huge footprint and drops to the coarsest mip
+  // (the dashed line that used to run down the antimeridian and off the poles). So no fract()
+  // (the textures repeat), and on the globe each quad unwraps its longitude around the quad's
+  // own centre, putting the branch cut between quads, never inside one.
+  float lonU = lon;
+#if !defined(MESH) && !defined(FLAT)
+  float rel = lon - u_view.x;
+  vec2 quadMid = floor(gl_FragCoord.xy * 0.5) * 2.0 + 1.0;
+  float relMid = relLon(v_px + quadMid - gl_FragCoord.xy);
+  lonU = u_view.x + rel + TAU * floor((relMid - rel) / TAU + 0.5);
+#endif
+  vec2 uv = vec2(lonU / TAU + 0.5, 0.5 - lat / PI);
+  // Where the meridians converge, a pixel spans far more longitude than latitude; past 32:1 let
+  // latitude set the mip, so the quad on the pole itself doesn't average half the planet.
+  vec2 fw = fwidth(uv) * vec2(2.0, 1.0);
+  float lodBias = -max(log2(fw.x / max(fw.y, 1e-7) / 32.0), 0.0);
+  vec3 day = toLinear(texture(u_day, uv, lodBias).rgb);
+  float lights = texture(u_night, uv, lodBias).r;
+  vec3 ter = texture(u_terrain, uv, lodBias).rgb;
   float water = ter.r;
 
   float mu = dot(nE, u_sun);
@@ -332,7 +359,7 @@ void main() {
   col = mix(col, sty * mix(0.75, 1.0, dayAmt), u_look.y);
 
 #ifdef CLOUDS
-  vec4 cl = texture(u_clouds, uv);
+  vec4 cl = texture(u_clouds, uv, lodBias);
   float cov = smoothstep(0.30, 0.86, cl.r) * cl.a * min(u_look.z, 1.0);
   float nightLift = clamp(u_look.z - 1.0, 0.0, 1.0);
   vec3 cloudNight = mix(vec3(0.055, 0.07, 0.11), vec3(0.30, 0.34, 0.42) * (0.6 + 0.4 * cl.r), nightLift);

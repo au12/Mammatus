@@ -248,7 +248,7 @@ export class Layers extends EventTarget {
     this.loading++;
     this.emit("loading", this.loading);
     try {
-      const img = await loadImage(`/api/sat/${src.product}/${step.stamp}.webp`);
+      const img = await loadImage(`/api/sat/${src.product}/${step.stamp}.webp?v=2`);
       if (gen !== this.gen) return;
       this.r.setClouds(img);
       this.r.look.clouds = src.product === "globalvis" ? 1 : 1.7;
@@ -257,7 +257,7 @@ export class Layers extends EventTarget {
       // prefetch neighbors as images (browser cache)
       for (const d of [-1, -2, 1]) {
         const st = this.steps[this.index + d];
-        if (st) loadImage(`/api/sat/${src.product}/${st.stamp}.webp`).catch(() => {});
+        if (st) loadImage(`/api/sat/${src.product}/${st.stamp}.webp?v=2`).catch(() => {});
       }
     } catch (err) {
       if (gen === this.gen) this.emit("error", { step, message: "Satellite image unavailable" });

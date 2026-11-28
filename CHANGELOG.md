@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.3 — 2026-11-28
+
+The globe's seams and poles.
+
+### Fixes
+- **No more line down the date line.** The equirectangular textures (Earth, night lights, terrain,
+  clouds) wrapped their longitude inside the shader, and wherever that wrap fell inside a 2x2 pixel
+  block the GPU took it for an enormous footprint and sampled its blurriest mip: a dashed line down the
+  antimeridian, and another running off the far side of whichever pole was in view. Longitude is now
+  unwrapped per pixel block, so the wrap always lands between blocks, and the one block sitting on the
+  pole takes its detail level from latitude instead of averaging half the planet.
+- **Satellite clouds meet at the poles smoothly.** Near a pole a pixel of longitude is a sliver of ground,
+  so the stretched fill these composites use where geostationary satellites can't see turned into a
+  starburst of spikes. Each row is now averaged along longitude over a constant ground width, widening
+  over the polar fill, so the clouds close over each pole in one smooth cap.
+- **Satellite imagery was the world twice over.** RealEarth's tile grid is square (4 x 4 tiles at the
+  zoom used); the stitcher asked for 8 columns, the server wrapped, and the composite held two copies of
+  the globe side by side, squeezing the clouds to half width. Stitched images are rebuilt under a new name,
+  so stale ones aren't reused.
+
 ## 1.3.2 — 2026-11-28
 
 An audit for battery life, stability and polish.
